@@ -1377,8 +1377,9 @@ export const make = Effect.gen(function* () {
               ? undefined
               : {
                   changeTrackingId,
+                  // Equal iterations put the merge base on the left, as the diff shows it.
                   iterationContext: {
-                    firstComparingIteration: 1,
+                    firstComparingIteration: tracking.iteration,
                     secondComparingIteration: tracking.iteration,
                   },
                 },
