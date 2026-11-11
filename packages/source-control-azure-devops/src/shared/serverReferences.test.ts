@@ -14,6 +14,10 @@ describe("serverReferenceAutolinks", () => {
       ["#15", "https://tfs.corp/DefaultCollection/Payments/_workitems/edit/15"],
       ["!21", "https://tfs.corp/DefaultCollection/Payments/_git/Api/pullrequest/21"],
     ]);
+    expect(
+      serverReferenceAutolinks("#15", "https://tfs.corp/DefaultCollection/Payments/_GIT/Api")[0]
+        ?.url,
+    ).toBe("https://tfs.corp/DefaultCollection/Payments/_workitems/edit/15");
   });
 
   it("names the project after the repository in a short repository URL", () => {

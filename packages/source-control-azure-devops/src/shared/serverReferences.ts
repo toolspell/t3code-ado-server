@@ -15,7 +15,7 @@ function projectUrl(
   const url = URL.parse(repositoryUrl);
   if (url === null || (url.protocol !== "https:" && url.protocol !== "http:")) return null;
   const segments = url.pathname.split("/").filter((segment) => segment.length > 0);
-  const git = segments.lastIndexOf("_git");
+  const git = segments.map((segment) => segment.toLowerCase()).lastIndexOf("_git");
   const repository = segments[git + 1];
   if (git < 1 || repository === undefined) return null;
   const base = `${url.origin}/${segments.slice(0, git).join("/")}`;
