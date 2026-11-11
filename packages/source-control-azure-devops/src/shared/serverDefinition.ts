@@ -13,6 +13,7 @@ import {
   serverCredentialSettingsFields,
 } from "@t3tools/source-control-core/shared/definition";
 import { icon } from "./icon.ts";
+import { serverMediaUrl, serverReferenceAutolinks } from "./serverReferences.ts";
 
 // Every server path has a collection in front of `_git`; a virtual directory may precede it.
 const CHANGE_REQUEST_PATH = /^\/((?:[^/]+\/)+_git\/[^/]+)\/pullrequest\/(\d+)(?:\/|$)/u;
@@ -96,6 +97,8 @@ export const definition = defineSourceControl({
     return url !== null && parseChangeRequestUrl(url) !== null;
   },
   checkoutChangeRequestHost: () => null,
+  referenceAutolinks: serverReferenceAutolinks,
+  mediaUrl: (url) => (isAzureDevOpsServicesHost(url.hostname) ? null : serverMediaUrl(url)),
   recognizeRemote: ({ remoteUrl, hostname }) => {
     if (isAzureDevOpsServicesHost(hostname)) return null;
     const repository = parseGitRemoteRepository(remoteUrl);
@@ -122,6 +125,8 @@ export const definition = defineSourceControl({
         required: true,
       },
       { scope: "Identity: Read", usedFor: "your account name and reviewers", required: true },
+      { scope: "Project and team: Read", usedFor: "reviewer suggestions", required: false },
+      { scope: "Work items: Read", usedFor: "the labels a project offers", required: false },
     ],
   },
   settings,

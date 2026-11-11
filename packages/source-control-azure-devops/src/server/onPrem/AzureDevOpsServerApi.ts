@@ -23,7 +23,7 @@ import { matchServerRepository, type ServerRepositoryRef } from "./azureDevOpsSe
 import * as AzureDevOpsServerHttp from "./AzureDevOpsServerHttp.ts";
 
 /** Azure DevOps Server 2022 and newer serve 7.0; an older server says it is out of range. */
-const API_VERSION = "7.0";
+export const API_VERSION = "7.0";
 /** ConnectionData and policy evaluations were never released, only previewed. */
 const API_PREVIEW_VERSION = "7.0-preview";
 
@@ -94,6 +94,8 @@ export class AzureDevOpsServerApi extends Context.Service<
       },
       AzureDevOpsServerApiError
     >;
+    /** The header that signs a request to `server` with its saved token. */
+    readonly authorization: (server: string) => Effect.Effect<string, AzureDevOpsServerApiError>;
     /** The response body as text. */
     readonly requestText: (
       input: AzureDevOpsServerRequest,
@@ -206,6 +208,10 @@ function statusFailure(
 }
 
 const REDIRECTS = new Set([301, 302, 303, 307, 308]);
+
+/** Azure DevOps takes a personal access token as the password of an empty user name. */
+const basicAuthorization = (token: string) =>
+  `Basic ${Buffer.from(`:${token}`, "utf8").toString("base64")}`;
 
 /** @public */
 export const make = Effect.gen(function* () {
@@ -367,7 +373,7 @@ export const make = Effect.gen(function* () {
       "azure_devops_server.operation": input.operation,
       "http.request.method": method,
     });
-    const authorization = `Basic ${Buffer.from(`:${token}`, "utf8").toString("base64")}`;
+    const authorization = basicAuthorization(token);
     const send = Effect.fn("AzureDevOpsServerApi.send")(
       function* (url: string) {
         const outgoing = HttpClientRequest.make(method)(url).pipe(
@@ -463,10 +469,14 @@ export const make = Effect.gen(function* () {
       ),
     );
 
+  const authorization = (server: string) =>
+    tokenFor(server, "authorization").pipe(Effect.map(basicAuthorization));
+
   return AzureDevOpsServerApi.of({
     servers,
     resolveRepository,
     resolveCheckout,
+    authorization,
     requestText,
     request,
     requestList,

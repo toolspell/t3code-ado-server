@@ -77,6 +77,7 @@ function makeLayer(lists: {
         target: { server: SERVER, project: "DemoProjectTwo", repository: "DemoProjectTwo" },
         remote: { name: "origin", url: `https://ado2022.fritz.box/${REPOSITORY}` },
       }),
+    authorization: () => Effect.succeed("Basic test"),
     requestText: (input) => Effect.sync(() => JSON.stringify(answer(input))),
     request: (input) => Effect.sync(() => answer(input)),
     requestList: (input) =>
@@ -533,46 +534,81 @@ it.effect("replies under a thread's first comment and resolves it", () => {
   }).pipe(Effect.provide(layer));
 });
 
-it.effect("keeps the mention names it knew when its name cache fills up", () => {
-  const SALLY = "c0ffee00-0000-4000-8000-000000000001";
-  const filler = Array.from(
-    { length: 1024 },
-    (_, index) => `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
-  );
-  let content = [HARRY, ...filler].map((id) => `@<${id}>`).join(" ");
+it.effect("suggests team members and recent authors and reviewers, never the author", () => {
+  const person = (id: string, name: string) => ({
+    id,
+    displayName: name,
+    uniqueName: `ADO2022\\${id}`,
+  });
+  const { layer } = makeLayer({
+    pullRequests: [],
+    answer: (input) => {
+      if (input.path.endsWith("/teams")) return { value: [{ id: "team-1" }] };
+      if (input.path.endsWith("/teams/team-1/members")) {
+        return { value: [{ identity: person("max", "Max Beckenbach") }] };
+      }
+      if (input.path === `${BASE}/pullrequests`) {
+        return {
+          value: [
+            pullRequest(20, {
+              createdBy: person("chughes", "Charlotte Hughes"),
+              reviewers: [{ ...person("obennett", "Olivia Bennett"), vote: 10 }],
+            }),
+          ],
+        };
+      }
+      if (input.path === `${BASE}/pullRequests/26` && input.method === undefined) {
+        return pullRequest(26, {
+          createdBy: person("chughes", "Charlotte Hughes"),
+          reviewers: [{ ...person("hwalker", "Harry Walker"), vote: 0 }],
+        });
+      }
+      return undefined;
+    },
+  });
+  return Effect.gen(function* () {
+    const provider = yield* AzureDevOpsServerPullRequestProvider.make;
+    const { candidates } = yield* provider.listReviewerCandidates({ ...ref, number: 26 });
+    assert.deepStrictEqual(
+      candidates.map((candidate) => [candidate.id, candidate.isRequested]),
+      [
+        ["hwalker", true],
+        ["max", false],
+        ["obennett", false],
+      ],
+    );
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("offers the project's tags as labels and adds or removes one", () => {
   const { layer, calls } = makeLayer({
     pullRequests: [],
     answer: (input) =>
-      input.path === `${BASE}/pullRequests/26/threads/7/comments/5` && input.method === undefined
-        ? { id: 5, content }
-        : input.path === "_apis/identities"
-          ? {
-              value: String(input.query?.identityIds)
-                .split(",")
-                .map((id) => ({
-                  id,
-                  providerDisplayName:
-                    id === HARRY ? "Harry Walker" : id === SALLY ? "Sally Ride" : `User ${id}`,
-                })),
-            }
+      input.path.endsWith("/_apis/wit/tags")
+        ? { value: [{ name: "backend" }, { name: "UI" }] }
+        : input.path === `${BASE}/pullRequests/26` && input.method === undefined
+          ? pullRequest(26, { labels: [{ name: "ui", active: true }] })
           : undefined,
   });
   return Effect.gen(function* () {
     const provider = yield* AzureDevOpsServerPullRequestProvider.make;
-    const edit = (body: string) =>
-      provider.updateComment!({
-        ...ref,
-        number: 26,
-        commentId: "7:5",
-        kind: "review-comment",
-        body,
-      });
-    yield* edit("Cleared.");
-    content = `@<${HARRY}> and @<${SALLY}>`;
-    yield* edit("@Harry Walker and @Sally Ride");
-    assert.deepStrictEqual(writes(calls).at(-1)?.body, {
-      content: `@<${HARRY}> and @<${SALLY}>`,
-    });
+    const { candidates } = yield* provider.listLabelCandidates!({ ...ref, number: 26 });
+    assert.deepStrictEqual(
+      candidates.map((candidate) => [candidate.name, candidate.isApplied]),
+      [
+        ["backend", false],
+        ["ui", true],
+      ],
+    );
+    yield* provider.setLabels!({ ...ref, number: 26, labels: ["backend"], applied: true });
+    yield* provider.setLabels!({ ...ref, number: 26, labels: ["ui"], applied: false });
+    assert.deepStrictEqual(
+      writes(calls).map((call) => [call.method, call.path, call.body]),
+      [
+        ["POST", `${BASE}/pullRequests/26/labels`, { name: "backend" }],
+        ["DELETE", `${BASE}/pullRequests/26/labels/ui`, undefined],
+      ],
+    );
   }).pipe(Effect.provide(layer));
 });
 
@@ -665,5 +701,48 @@ it.effect("reads past a page of rows that do not decode", () => {
         [3, 3],
       ],
     );
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("keeps the mention names it knew when its name cache fills up", () => {
+  const SALLY = "c0ffee00-0000-4000-8000-000000000001";
+  const filler = Array.from(
+    { length: 1024 },
+    (_, index) => `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+  );
+  let content = [HARRY, ...filler].map((id) => `@<${id}>`).join(" ");
+  const { layer, calls } = makeLayer({
+    pullRequests: [],
+    answer: (input) =>
+      input.path === `${BASE}/pullRequests/26/threads/7/comments/5` && input.method === undefined
+        ? { id: 5, content }
+        : input.path === "_apis/identities"
+          ? {
+              value: String(input.query?.identityIds)
+                .split(",")
+                .map((id) => ({
+                  id,
+                  providerDisplayName:
+                    id === HARRY ? "Harry Walker" : id === SALLY ? "Sally Ride" : `User ${id}`,
+                })),
+            }
+          : undefined,
+  });
+  return Effect.gen(function* () {
+    const provider = yield* AzureDevOpsServerPullRequestProvider.make;
+    const edit = (body: string) =>
+      provider.updateComment!({
+        ...ref,
+        number: 26,
+        commentId: "7:5",
+        kind: "review-comment",
+        body,
+      });
+    yield* edit("Cleared.");
+    content = `@<${HARRY}> and @<${SALLY}>`;
+    yield* edit("@Harry Walker and @Sally Ride");
+    assert.deepStrictEqual(writes(calls).at(-1)?.body, {
+      content: `@<${HARRY}> and @<${SALLY}>`,
+    });
   }).pipe(Effect.provide(layer));
 });

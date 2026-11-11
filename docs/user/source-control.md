@@ -117,7 +117,8 @@ For Azure DevOps Server 2022 or newer on your own network. T3 Code talks to the 
 with a personal access token and does not need Azure CLI.
 
 1. On the server, open **User settings → Personal access tokens** and create a token with
-   **Code: Read & write** and **Identity: Read**.
+   **Code: Read & write** and **Identity: Read**. Add **Project and team: Read** for reviewer
+   suggestions and **Work items: Read** to pick from the project's labels.
 2. In T3 Code, open **Settings → Source control**, expand **Azure DevOps Server**, and choose
    **Add server**.
 3. Enter the collection URL, the address up to and including the collection as your clone URLs
@@ -130,6 +131,8 @@ choose **Edit**.
 
 Approving a pull request votes **Approved** and requesting changes votes **Waiting for author**.
 Branch policies show as checks, and the merge methods follow the branch's merge strategy policy.
+`#123` links a work item and `!123` a pull request. Images attached to a pull request load through
+the T3 Code server, so they show on remote and mobile clients too.
 
 If the server uses a certificate from your company's or its own certificate authority, install that
 certificate in the operating system's certificate store on the machine running T3 Code, or point

@@ -53,6 +53,7 @@ function makeLayer() {
           url: "https://ado2022.fritz.box/DefaultCollection/DemoProjectTwo/_git/DemoProjectTwo",
         },
       }),
+    authorization: () => Effect.succeed("Basic test"),
     requestText: (input) => Effect.sync(() => JSON.stringify(answer(input))),
     request: (input) => Effect.sync(() => answer(input)),
     requestList: (input) =>
