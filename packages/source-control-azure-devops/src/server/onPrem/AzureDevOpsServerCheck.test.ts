@@ -27,6 +27,7 @@ function makeLayer(
     servers: Effect.succeed([]),
     resolveRepository: () => Effect.die("unused"),
     resolveCheckout: () => Effect.die("unused"),
+    authorization: () => Effect.succeed("Basic test"),
     requestText: (input) => request(input).pipe(Effect.map((body) => JSON.stringify(body))),
     request,
     requestList: (input) =>

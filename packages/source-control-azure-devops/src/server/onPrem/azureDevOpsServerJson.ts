@@ -212,6 +212,7 @@ export interface ServerPullRequest {
   readonly body: string;
   readonly url: string;
   readonly author: PullRequestActor | null;
+  readonly authorId: string | null;
   readonly headBranch: string;
   readonly baseBranch: string;
   readonly headSha: string | null;
@@ -319,6 +320,7 @@ function toPullRequest(collectionUrl: string, raw: RawPullRequest): ServerPullRe
     body: raw.description ?? "",
     url: pullRequestWebUrl(collectionUrl, location, raw.pullRequestId),
     author: toActor(raw.createdBy),
+    authorId: trimmed(raw.createdBy?.id),
     headBranch,
     baseBranch,
     headSha: trimmed(raw.lastMergeSourceCommit?.commitId),
@@ -775,4 +777,35 @@ export function decodeRefUpdateFailure(body: unknown): string | null {
 
 export function decodeIdentityIds(rows: ReadonlyArray<unknown>): ReadonlyArray<string> {
   return decodeEach(RawIdentityRecord, rows).map((identity) => identity.id);
+}
+
+const RawTag = Schema.Struct({ name: Schema.String, active: OptionalBoolean });
+
+export function decodeTagNames(rows: ReadonlyArray<unknown>): ReadonlyArray<string> {
+  return decodeEach(RawTag, rows).flatMap((tag) =>
+    tag.active === false ? [] : (trimmed(tag.name) ?? []),
+  );
+}
+
+export interface ServerIdentity extends PullRequestActor {
+  readonly id: string;
+  readonly isGroup: boolean;
+}
+
+const RawTeamMember = Schema.Struct({ identity: RawIdentity });
+
+export function decodeTeamMembers(rows: ReadonlyArray<unknown>): ReadonlyArray<ServerIdentity> {
+  return decodeEach(RawTeamMember, rows).flatMap(({ identity }) => {
+    const actor = toActor(identity);
+    const id = trimmed(identity.id);
+    return actor === null || id === null
+      ? []
+      : [{ ...actor, id, isGroup: identity.isContainer === true }];
+  });
+}
+
+const RawTeam = Schema.Struct({ id: Schema.String });
+
+export function decodeTeamIds(rows: ReadonlyArray<unknown>): ReadonlyArray<string> {
+  return decodeEach(RawTeam, rows).map((team) => team.id);
 }

@@ -62,15 +62,20 @@ import {
   decodeMergeCapabilities,
   decodePullRequest,
   decodeRefObjectId,
+  decodePullRequests,
   decodeRefUpdateFailure,
   decodeRepository,
   decodeRootCommentId,
+  decodeTagNames,
+  decodeTeamIds,
+  decodeTeamMembers,
   decodeThreads,
   mentionedIdentityIds,
   mentionIdsIn,
   pendingReviewerLogins,
   pullRequestUpdatedAt,
   reviewDecisionOf,
+  type ServerIdentity,
   type ServerPullRequest,
   restoreMentions,
   type ServerThreads,
@@ -111,8 +116,8 @@ const CAPABILITIES: PullRequestCapabilities = {
     resolve: true,
     verdicts: ["comment", "approve", "request-changes"],
   },
-  // Identity search on Azure DevOps Server matches whole names only, so there is no picker yet.
-  reviewers: { request: true, listCandidates: false, searchCandidates: false },
+  reviewers: { request: true, listCandidates: true, searchCandidates: false },
+  labels: true,
   edit: { changeRequest: true, comment: true },
   // Azure's own viewed marks use an undocumented route and reset on every push.
   viewedFiles: "environment",
@@ -174,6 +179,9 @@ const unreadUnlessUrgent = <A>(
   );
 
 const IDENTITY_NAME_CAPACITY = 1024;
+const IDENTITY_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+const MAX_CANDIDATE_TEAMS = 10;
+const RECENT_PULL_REQUESTS = 50;
 /** Past any line's end, so a comment covers its last line whole. */
 const LINE_END_OFFSET = 100_000;
 
@@ -597,6 +605,8 @@ export const make = Effect.gen(function* () {
     server: string,
     login: string,
   ) {
+    // Candidates carry the identity's id itself.
+    if (IDENTITY_ID.test(login)) return login;
     const rows = yield* api.requestList({
       server,
       operation: "setReviewerRequest",
@@ -1299,7 +1309,155 @@ export const make = Effect.gen(function* () {
       Effect.mapError(fail("updateChangeRequest")),
     ),
 
-    listReviewerCandidates: () => unsupported("listReviewerCandidates"),
+    /**
+     * Identity search on Azure DevOps Server matches whole names only, so candidates are the
+     * project's teams and whoever wrote or reviewed the repository's recent pull requests.
+     */
+    listReviewerCandidates: Effect.fn(
+      "AzureDevOpsServerPullRequestProvider.listReviewerCandidates",
+    )(
+      function* (input) {
+        const target = yield* locate(input);
+        const pullRequest = yield* readPullRequest(target, input.number, "listReviewerCandidates");
+        const project = AzureDevOpsServerApi.encodePath(pullRequest.location.projectId);
+        const teamIds = yield* api
+          .requestList({
+            server: target.server,
+            operation: "listReviewerCandidates",
+            path: `_apis/projects/${project}/teams`,
+            query: { $top: MAX_CANDIDATE_TEAMS },
+          })
+          .pipe(
+            Effect.map(decodeTeamIds),
+            Effect.orElseSucceed((): ReadonlyArray<string> => []),
+          );
+        const [members, recent] = yield* Effect.all(
+          [
+            Effect.forEach(
+              teamIds,
+              (teamId) =>
+                api
+                  .requestList({
+                    server: target.server,
+                    operation: "listReviewerCandidates",
+                    path: `_apis/projects/${project}/teams/${AzureDevOpsServerApi.encodePath(teamId)}/members`,
+                  })
+                  .pipe(
+                    Effect.map(decodeTeamMembers),
+                    Effect.orElseSucceed((): ReadonlyArray<ServerIdentity> => []),
+                  ),
+              { concurrency: 4 },
+            ),
+            api
+              .requestList({
+                server: target.server,
+                operation: "listReviewerCandidates",
+                path: `${repositoryPath(target)}/pullrequests`,
+                query: { "searchCriteria.status": "all", $top: RECENT_PULL_REQUESTS },
+              })
+              .pipe(
+                Effect.map((rows) => decodePullRequests(target.server, rows)),
+                Effect.orElseSucceed((): ReadonlyArray<ServerPullRequest> => []),
+              ),
+          ],
+          { concurrency: 2 },
+        );
+        const people = new Map<string, ServerIdentity>();
+        const add = (identity: ServerIdentity) => {
+          if (identity.id !== pullRequest.authorId) people.set(identity.id, identity);
+        };
+        for (const identity of members.flat()) add(identity);
+        for (const recentPullRequest of recent) {
+          for (const reviewer of recentPullRequest.reviewers) add(reviewer);
+          if (recentPullRequest.author !== null && recentPullRequest.authorId !== null) {
+            add({ ...recentPullRequest.author, id: recentPullRequest.authorId, isGroup: false });
+          }
+        }
+        for (const reviewer of pullRequest.reviewers) add(reviewer);
+        const requested = new Set(pullRequest.reviewers.map((reviewer) => reviewer.id));
+        const query = input.query?.trim().toLowerCase() ?? "";
+        const candidates = [...people.values()]
+          .filter(
+            (identity) =>
+              query === "" ||
+              identity.login.toLowerCase().includes(query) ||
+              (identity.name ?? "").toLowerCase().includes(query),
+          )
+          .toSorted((left, right) =>
+            (left.name ?? left.login).localeCompare(right.name ?? right.login),
+          )
+          .map((identity) => ({
+            id: identity.id,
+            kind: identity.isGroup ? ("team" as const) : ("user" as const),
+            login: identity.login,
+            name: identity.name,
+            avatarUrl: null,
+            isRequested: requested.has(identity.id),
+          }));
+        return { candidates, truncated: false };
+      },
+      Effect.mapError(fail("listReviewerCandidates")),
+    ),
+
+    listLabelCandidates: Effect.fn("AzureDevOpsServerPullRequestProvider.listLabelCandidates")(
+      function* (input) {
+        const target = yield* locate(input);
+        const pullRequest = yield* readPullRequest(target, input.number, "listLabelCandidates");
+        // Labels are project tags, which only a token that reads work items can list.
+        const tags = yield* api
+          .requestList({
+            server: target.server,
+            operation: "listLabelCandidates",
+            path: `${AzureDevOpsServerApi.encodePath(pullRequest.location.project)}/_apis/wit/tags`,
+            preview: true,
+          })
+          .pipe(
+            Effect.map(decodeTagNames),
+            Effect.orElseSucceed((): ReadonlyArray<string> => []),
+          );
+        const applied = new Set(pullRequest.labels.map((name) => name.toLowerCase()));
+        const names = new Map<string, string>();
+        for (const name of [...pullRequest.labels, ...tags]) {
+          if (!names.has(name.toLowerCase())) names.set(name.toLowerCase(), name);
+        }
+        return {
+          candidates: [...names.values()]
+            .toSorted((left, right) => left.localeCompare(right))
+            .map((name) => ({
+              name,
+              color: null,
+              description: null,
+              isApplied: applied.has(name.toLowerCase()),
+            })),
+          truncated: false,
+        };
+      },
+      Effect.mapError(fail("listLabelCandidates")),
+    ),
+
+    setLabels: Effect.fn("AzureDevOpsServerPullRequestProvider.setLabels")(
+      function* (input) {
+        const target = yield* locate(input);
+        const path = `${pullRequestPath(target, input.number)}/labels`;
+        for (const name of input.labels) {
+          yield* input.applied
+            ? api.request({
+                server: target.server,
+                operation: "setLabels",
+                method: "POST",
+                path,
+                body: { name },
+              })
+            : api.request({
+                server: target.server,
+                operation: "setLabels",
+                method: "DELETE",
+                path: `${path}/${AzureDevOpsServerApi.encodePath(name)}`,
+              });
+        }
+      },
+      Effect.mapError(fail("setLabels")),
+    ),
 
     setReviewerRequest: Effect.fn("AzureDevOpsServerPullRequestProvider.setReviewerRequest")(
       function* (input) {
