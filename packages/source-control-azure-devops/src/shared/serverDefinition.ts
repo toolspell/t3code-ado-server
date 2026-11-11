@@ -21,7 +21,7 @@ const COMMIT_PATH = /^\/((?:[^/]+\/)+_git\/[^/]+)\/commit\/([0-9a-f]+)\/?$/iu;
 const KIND = SourceControlProviderKind.make("azure-devops-server");
 
 /** Azure DevOps Services, which the `azure-devops` host reads through `az`. */
-function isAzureDevOpsServicesHost(hostname: string): boolean {
+export function isAzureDevOpsServicesHost(hostname: string): boolean {
   const host = hostname.toLowerCase();
   return (
     host === "dev.azure.com" ||
@@ -99,5 +99,21 @@ export const definition = defineSourceControl({
     identity.canonicalKey.toLowerCase() === `${link.host}/${link.repository}`.toLowerCase(),
   canReadChangeRequestOnHost: (identity, link) =>
     isChangeRequestOnProjectHost(projectChangeRequestHost(identity, KIND), identity, link),
+  servers: {
+    urlLabel: "Collection URL",
+    urlPlaceholder: "https://tfs.example.com/DefaultCollection",
+    urlHint:
+      "The address up to and including the collection, as clone URLs show it before the project.",
+    tokenLabel: "Personal access token",
+    newTokenUrl: (serverUrl) => `${serverUrl.replace(/\/+$/u, "")}/_usersSettings/tokens`,
+    tokenScopes: [
+      {
+        scope: "Code: Read & write",
+        usedFor: "pull requests, diffs, comments, votes and branch policies",
+        required: true,
+      },
+      { scope: "Identity: Read", usedFor: "your account name and reviewers", required: true },
+    ],
+  },
   settings,
 });

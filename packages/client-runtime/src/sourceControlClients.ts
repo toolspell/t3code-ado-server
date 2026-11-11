@@ -2,6 +2,7 @@ import { builtInSourceControlDefinitions } from "@t3tools/source-control-definit
 import {
   HostCredentialSettings,
   readSourceControlHostSettings,
+  ServerCredentialSettings,
   type SourceControlAppSignIn,
   type SourceControlDefinition,
 } from "@t3tools/source-control-core/shared/definition";
@@ -15,12 +16,14 @@ export {
   type ChangeRequestTerminology,
   type HostAccountChoice,
   type HostCredentialSettings,
+  normalizeSourceControlServerUrl,
   type ParsedChangeRequestUrl,
   type ReferenceAutolink,
   type SourceControlAppSignIn,
   type SourceControlDefinition,
   type SourceControlHostCredentials,
   type SourceControlIcon,
+  type SourceControlServers,
 } from "@t3tools/source-control-core/shared/definition";
 
 export const sourceControlClients = builtInSourceControlDefinitions;
@@ -31,6 +34,14 @@ export function readHostCredentialSettings(
   kind: string,
 ): HostCredentialSettings {
   return readSourceControlHostSettings(HostCredentialSettings, settings.sourceControlHosts[kind]);
+}
+
+/** The saved per-server tokens of a host whose definition has `servers`, keyed by server URL. */
+export function readServerCredentialSettings(
+  settings: Pick<ServerSettings, "sourceControlHosts">,
+  kind: string,
+): ServerCredentialSettings {
+  return readSourceControlHostSettings(ServerCredentialSettings, settings.sourceControlHosts[kind]);
 }
 
 /** A host's change request term where it opens a sentence: "Merge request merged". */

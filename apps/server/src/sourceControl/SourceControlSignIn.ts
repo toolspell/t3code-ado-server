@@ -1,19 +1,28 @@
 import {
   type SourceControlAppAccess,
   type SourceControlAppAccessInput,
+  SourceControlCheckServerError,
+  type SourceControlCheckServerInput,
+  type SourceControlCheckServerResult,
   SourceControlSignInError,
   type SourceControlSignInInput,
   type SourceControlSignInPrompt,
   type SourceControlSignInResult,
   type SourceControlStarredInput,
 } from "@t3tools/contracts";
+import * as SecretResolver from "@t3tools/secret-provider-core/server/SecretResolver";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
+import * as SecretResolverLayer from "../secrets/SecretResolver.ts";
+import { requireSettingsSecret } from "../secrets/settingsSecretValue.ts";
 import * as SourceControlBuiltInDrivers from "./builtInDrivers.ts";
 
-/** Signs the server in to a forge through the forge's own app, and reads what its account did. */
+/**
+ * Signs the server in to a forge, through the forge's own app or with a token for a server the user
+ * adds, and reads what its account did.
+ */
 export class SourceControlSignIn extends Context.Service<
   SourceControlSignIn,
   {
@@ -29,11 +38,15 @@ export class SourceControlSignIn extends Context.Service<
     readonly access: (input: SourceControlAppAccessInput) => Effect.Effect<SourceControlAppAccess>;
     readonly starred: (input: SourceControlStarredInput) => Effect.Effect<boolean>;
     readonly star: (input: SourceControlStarredInput) => Effect.Effect<boolean>;
+    readonly checkServer: (
+      input: SourceControlCheckServerInput,
+    ) => Effect.Effect<SourceControlCheckServerResult, SourceControlCheckServerError>;
   }
 >()("t3/sourceControl/SourceControlSignIn") {}
 
 const make = Effect.gen(function* () {
   const drivers = yield* SourceControlBuiltInDrivers.SourceControlDrivers;
+  const secrets = yield* SecretResolver.SecretResolver;
 
   const signInFor = (input: SourceControlSignInInput) => {
     const signIn = drivers.find(({ driver }) => driver.kind === input.provider)?.instance.signIn;
@@ -76,7 +89,37 @@ const make = Effect.gen(function* () {
         .starRepository;
       return star === undefined ? false : yield* star(input.host, input.repository);
     }),
+    checkServer: Effect.fn("SourceControlSignIn.checkServer")(function* (input) {
+      const checkServer = drivers.find(({ driver }) => driver.kind === input.provider)?.instance
+        .checkServer;
+      if (checkServer === undefined) {
+        return yield* new SourceControlCheckServerError({
+          provider: input.provider,
+          url: input.url,
+          reason: "unsupported",
+          detail: `${input.provider} has no servers to add.`,
+        });
+      }
+      const token =
+        input.token === undefined
+          ? undefined
+          : yield* requireSettingsSecret(secrets, input.token).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new SourceControlCheckServerError({
+                    provider: input.provider,
+                    url: input.url,
+                    reason: "unauthenticated",
+                    detail: `Could not read the token from the secret provider "${cause.provider}". Unlock or fix it in Settings, then try again.`,
+                    cause,
+                  }),
+              ),
+            );
+      return yield* checkServer({ url: input.url, token });
+    }),
   });
 });
 
-export const layer = Layer.effect(SourceControlSignIn, make);
+export const layer = Layer.effect(SourceControlSignIn, make).pipe(
+  Layer.provide(SecretResolverLayer.layer),
+);

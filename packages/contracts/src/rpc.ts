@@ -404,6 +404,9 @@ import {
   SourceControlAppAccess,
   SourceControlAppAccessInput,
   SourceControlStarredInput,
+  SourceControlCheckServerError,
+  SourceControlCheckServerInput,
+  SourceControlCheckServerResult,
   SourceControlSignInError,
   SourceControlSignInInput,
   SourceControlSignInPrompt,
@@ -606,6 +609,7 @@ export const WS_METHODS = {
   sourceControlAppAccess: "sourceControl.appAccess",
   sourceControlStarred: "sourceControl.starred",
   sourceControlStar: "sourceControl.star",
+  sourceControlCheckServer: "sourceControl.checkServer",
   projectCloneStart: "projectClone.start",
   projectCloneCancel: "projectClone.cancel",
   projectCloneRetry: "projectClone.retry",
@@ -1295,6 +1299,13 @@ const WsSourceControlStarRpc = Rpc.make(WS_METHODS.sourceControlStar, {
   payload: SourceControlStarredInput,
   success: Schema.Boolean,
   error: EnvironmentAuthorizationError,
+});
+
+// Signs in to a self-hosted server with a token, saved or entered, without saving either.
+const WsSourceControlCheckServerRpc = Rpc.make(WS_METHODS.sourceControlCheckServer, {
+  payload: SourceControlCheckServerInput,
+  success: SourceControlCheckServerResult,
+  error: Schema.Union([SourceControlCheckServerError, EnvironmentAuthorizationError]),
 });
 
 // Returns when the project exists and cloning starts; progress uses the subscription.
@@ -2174,6 +2185,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsSourceControlCloneRepositoryRpc,
   WsSourceControlPublishRepositoryRpc,
   WsSourceControlSignInStartRpc,
+  WsSourceControlCheckServerRpc,
   WsSourceControlSignInWaitRpc,
   WsSourceControlSignInCancelRpc,
   WsSourceControlAppAccessRpc,

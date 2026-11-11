@@ -1444,6 +1444,9 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("server settings"
             github: { tokens: { "github.com": "github-secret" } },
             bitbucket: { email: "me@example.test", accessToken: "bitbucket-secret" },
             gitcafe: { token: "gitcafe-secret" },
+            "azure-devops-server": {
+              tokens: { "https://tfs.example.test/defaultcollection": "ado-server-secret" },
+            },
           },
           usageLimitSources: {
             [UsageLimitSourceId.make("hub")]: {
@@ -1471,6 +1474,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("server settings"
           "github-secret",
           "bitbucket-secret",
           "gitcafe-secret",
+          "ado-server-secret",
           "quota-secret",
           "expo-secret",
         ];

@@ -33,6 +33,7 @@ import { GitIcon, JujutsuIcon, type Icon } from "../Icons";
 import { SourceControlHostSettings } from "./SourceControlHostSettings";
 import { SourceControlAccountSettings } from "./SourceControlAccountSettings";
 import { SourceControlAppSignInSettings } from "./SourceControlAppSignInSettings";
+import { SourceControlServerSettings } from "./SourceControlServerSettings";
 import { SourceControlTokenSettings } from "./SourceControlTokenSettings";
 import { RedactedSensitiveText } from "./RedactedSensitiveText";
 import { SourceControlWritingSettingsSection } from "./SourceControlWritingSettings";
@@ -391,7 +392,21 @@ export function SourceControlSettingsPanel() {
   const hostSettingsPanel = (item: SourceControlProviderDiscoveryItem) => {
     const definition = sourceControlClients.find(item.kind);
     if (!definition?.settings || environmentId === null) return undefined;
-    const { credentials } = definition;
+    const { credentials, servers } = definition;
+    if (servers) {
+      return (
+        <SettingsSearchTarget id={sourceControlHostSettingsSearchId(item.kind)}>
+          <SourceControlServerSettings
+            key={environmentId}
+            environmentId={environmentId}
+            definition={definition}
+            servers={servers}
+            auth={item.auth}
+            onSaved={handleScan}
+          />
+        </SettingsSearchTarget>
+      );
+    }
     if (credentials) {
       return (
         <SettingsSearchTarget id={sourceControlHostSettingsSearchId(item.kind)}>

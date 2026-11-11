@@ -8,6 +8,7 @@ import * as Layer from "effect/Layer";
 import { definition } from "../../shared/serverDefinition.ts";
 
 import * as AzureDevOpsServerApi from "./AzureDevOpsServerApi.ts";
+import * as AzureDevOpsServerCheck from "./AzureDevOpsServerCheck.ts";
 import * as AzureDevOpsServerHttp from "./AzureDevOpsServerHttp.ts";
 import * as AzureDevOpsServerPullRequestProvider from "./AzureDevOpsServerPullRequestProvider.ts";
 import * as AzureDevOpsServerSourceControlProvider from "./AzureDevOpsServerSourceControlProvider.ts";
@@ -18,6 +19,7 @@ const makeInstance = Effect.all({
   sourceControl: AzureDevOpsServerSourceControlProvider.make,
   discovery: AzureDevOpsServerSourceControlProvider.makeDiscovery,
   pullRequests: AzureDevOpsServerPullRequestProvider.make,
+  checkServer: AzureDevOpsServerCheck.make,
 });
 
 export const driver = defineSourceControlDriver({
