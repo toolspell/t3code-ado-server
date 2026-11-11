@@ -1,6 +1,8 @@
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as TestClock from "effect/testing/TestClock";
 
 import * as AzureDevOpsServerApi from "./AzureDevOpsServerApi.ts";
 import * as AzureDevOpsServerPullRequestProvider from "./AzureDevOpsServerPullRequestProvider.ts";
@@ -180,15 +182,191 @@ it.effect("fails a file it cannot read instead of showing it as empty", () => {
   }).pipe(Effect.provide(layer));
 });
 
-it.effect("lets a throttled check read through so the caller backs off", () => {
-  const { layer } = makeLayer({
+const writes = (calls: ReadonlyArray<AzureDevOpsServerApi.AzureDevOpsServerRequest>) =>
+  calls.filter((call) => call.method !== undefined && call.method !== "GET");
+
+it.effect("completes at the head the reader saw and drops agent credits from the message", () => {
+  let reads = 0;
+  const { layer, calls } = makeLayer({
     pullRequests: [],
-    answer: (input) => (input.path.endsWith("/policy/evaluations") ? THROTTLED : undefined),
+    answer: (input) => {
+      if (input.path !== `${BASE}/pullRequests/26`) return undefined;
+      if (input.method === "PATCH") return pullRequest(26, { title: "Safe writes" });
+      reads += 1;
+      // Azure completes in the background: the reply and the first read are still active.
+      return pullRequest(26, {
+        title: "Safe writes",
+        description: "Body.\n\nCo-Authored-By: Claude <noreply@anthropic.com>",
+        lastMergeSourceCommit: { commitId: "abc123" },
+        ...(reads > 2 ? { status: "completed", closedDate: "2026-11-11T14:09:19Z" } : {}),
+      });
+    },
   });
   return Effect.gen(function* () {
     const provider = yield* AzureDevOpsServerPullRequestProvider.make;
-    const failure = yield* Effect.flip(provider.getChangeRequestChecks!({ ...ref, number: 26 }));
-    assert.strictEqual(failure.reason, "rate-limited");
+    const merging = yield* provider
+      .runAction({
+        ...ref,
+        number: 26,
+        action: "merge",
+        mergeMethod: "squash",
+        removeAgentCreditsOnMerge: true,
+      })
+      .pipe(Effect.forkChild);
+    yield* TestClock.adjust("1 second");
+    const summary = yield* Fiber.join(merging);
+    assert.strictEqual(summary?.state, "merged");
+    assert.deepStrictEqual(
+      writes(calls).map((call) => [call.method, call.path, call.body]),
+      [
+        [
+          "PATCH",
+          `${BASE}/pullRequests/26`,
+          {
+            status: "completed",
+            lastMergeSourceCommit: { commitId: "abc123" },
+            completionOptions: {
+              mergeStrategy: "squash",
+              mergeCommitMessage: "Merged PR 26: Safe writes\n\nBody.",
+            },
+          },
+        ],
+      ],
+    );
+    // Dated by the threads and the close, as later reads date it, so it is not dropped as stale.
+    assert.strictEqual(summary?.updatedAt, "2026-11-11T14:09:19.000Z");
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("turns auto-complete off by clearing who set it", () => {
+  const { layer, calls } = makeLayer({ pullRequests: [] });
+  return Effect.gen(function* () {
+    const provider = yield* AzureDevOpsServerPullRequestProvider.make;
+    yield* provider.runAction({ ...ref, number: 26, action: "disable-auto-merge" });
+    assert.deepStrictEqual(writes(calls)[0]?.body, {
+      autoCompleteSetBy: { id: "00000000-0000-0000-0000-000000000000" },
+    });
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("deletes a finished pull request's source branch only where it ended", () => {
+  const refs = { value: [{ name: "refs/heads/feature/26", objectId: "def456" }] };
+  const run = (
+    refused: boolean,
+    overrides: Record<string, unknown> = {},
+    defaultBranch = "main",
+  ) => {
+    const { layer, calls } = makeLayer({
+      pullRequests: [],
+      answer: (input) =>
+        input.method === "POST" && input.path.endsWith("/refs")
+          ? {
+              value: [
+                refused
+                  ? { success: false, updateStatus: "rejectedByPolicy", customMessage: "Locked" }
+                  : { success: true },
+              ],
+            }
+          : input.path === `${BASE}/pullRequests/26`
+            ? pullRequest(26, {
+                status: "completed",
+                lastMergeSourceCommit: { commitId: "DEF456" },
+                ...overrides,
+              })
+            : input.path === BASE
+              ? {
+                  id: "repo",
+                  name: "DemoProjectTwo",
+                  project: { id: "proj", name: "DemoProjectTwo" },
+                  defaultBranch: `refs/heads/${defaultBranch}`,
+                }
+              : input.path.endsWith("/refs")
+                ? refs
+                : undefined,
+    });
+    return Effect.gen(function* () {
+      const provider = yield* AzureDevOpsServerPullRequestProvider.make;
+      const result = yield* provider
+        .runAction({ ...ref, number: 26, action: "delete-branch" })
+        .pipe(Effect.result);
+      return {
+        reason: result._tag === "Failure" ? result.failure.reason : null,
+        writes: writes(calls).map((call) => call.body),
+      };
+    }).pipe(Effect.provide(layer));
+  };
+  return Effect.gen(function* () {
+    assert.deepStrictEqual(yield* run(false), {
+      reason: null,
+      writes: [
+        [
+          {
+            name: "refs/heads/feature/26",
+            oldObjectId: "def456",
+            newObjectId: "0000000000000000000000000000000000000000",
+          },
+        ],
+      ],
+    });
+    assert.strictEqual((yield* run(true)).reason, "forbidden");
+    for (const [why, overrides, defaultBranch] of [
+      // A fork's branch is not this repository's to delete, whatever shares its name here.
+      ["fork", { forkSource: { repository: { id: "fork" } } }, "main"],
+      ["open", { status: "active" }, "main"],
+      ["pushed since", { lastMergeSourceCommit: { commitId: "abc123" } }, "main"],
+      ["default branch", {}, "feature/26"],
+    ] as const) {
+      assert.deepStrictEqual(
+        yield* run(false, overrides, defaultBranch),
+        {
+          reason: "forbidden",
+          writes: [],
+        },
+        why,
+      );
+    }
+  });
+});
+
+it.effect("adds a reviewer by account name and removes one already on the pull request", () => {
+  const { layer, calls } = makeLayer({
+    pullRequests: [],
+    answer: (input) =>
+      input.path === "_apis/identities"
+        ? { value: [{ id: "harry-id", providerDisplayName: "Harry Walker" }] }
+        : input.path === `${BASE}/pullRequests/26` && input.method === undefined
+          ? pullRequest(26, {
+              reviewers: [
+                { id: "max-id", uniqueName: "ADO2022\\max", displayName: "Max", vote: 0 },
+              ],
+            })
+          : undefined,
+  });
+  return Effect.gen(function* () {
+    const provider = yield* AzureDevOpsServerPullRequestProvider.make;
+    yield* provider.setReviewerRequest({
+      ...ref,
+      number: 26,
+      reviewers: [{ id: "ADO2022\\hwalker", kind: "user" }],
+      requested: true,
+    });
+    yield* provider.setReviewerRequest({
+      ...ref,
+      number: 26,
+      reviewers: [{ id: "ADO2022\\max", kind: "user" }],
+      requested: false,
+    });
+    assert.deepStrictEqual(
+      calls.find((call) => call.path === "_apis/identities")?.query?.searchFilter,
+      "AccountName",
+    );
+    assert.deepStrictEqual(
+      writes(calls).map((call) => [call.method, call.path]),
+      [
+        ["PUT", `${BASE}/pullRequests/26/reviewers/harry-id`],
+        ["DELETE", `${BASE}/pullRequests/26/reviewers/max-id`],
+      ],
+    );
   }).pipe(Effect.provide(layer));
 });
 
@@ -212,6 +390,18 @@ it.effect("marks checks it could not list instead of passing on the rest", () =>
         ["Branch policies", "pending", true],
       ],
     );
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("lets a throttled check read through so the caller backs off", () => {
+  const { layer } = makeLayer({
+    pullRequests: [],
+    answer: (input) => (input.path.endsWith("/policy/evaluations") ? THROTTLED : undefined),
+  });
+  return Effect.gen(function* () {
+    const provider = yield* AzureDevOpsServerPullRequestProvider.make;
+    const failure = yield* Effect.flip(provider.getChangeRequestChecks!({ ...ref, number: 26 }));
+    assert.strictEqual(failure.reason, "rate-limited");
   }).pipe(Effect.provide(layer));
 });
 
