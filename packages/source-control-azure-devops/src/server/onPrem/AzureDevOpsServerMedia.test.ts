@@ -51,6 +51,7 @@ it.effect("sends the token only to media inside a configured collection, and unp
     assert.strictEqual(inside?.headers["content-encoding"], undefined);
     assert.strictEqual(yield* inside!.text, "png bytes");
     assert.strictEqual(requests[0]?.headers.authorization, "Basic secret");
+    assert.strictEqual(new URL(requests[0]?.url ?? "").searchParams.get("api-version"), "7.0");
     // A range of a gzip stream would decode to nothing.
     assert.strictEqual(requests[0]?.headers.range, undefined);
     for (const url of [

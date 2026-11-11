@@ -35,6 +35,9 @@ export const make = Effect.gen(function* () {
     if (server === undefined) return null;
     const authorization = yield* api.authorization(server).pipe(Effect.option);
     if (Option.isNone(authorization)) return null;
+    // Without one, Azure answers with its newest version instead of the pinned one.
+    if (!url.searchParams.has("api-version"))
+      url.searchParams.set("api-version", AzureDevOpsServerApi.API_VERSION);
     const client = HttpClient.withScope(yield* http.client);
     // Azure keeps attachments gzipped and serves them so whatever the request asks, and a range of
     // a gzip stream decodes to nothing, so the whole file is read and unpacked here.

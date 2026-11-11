@@ -23,7 +23,7 @@ import { matchServerRepository, type ServerRepositoryRef } from "./azureDevOpsSe
 import * as AzureDevOpsServerHttp from "./AzureDevOpsServerHttp.ts";
 
 /** Azure DevOps Server 2022 and newer serve 7.0; an older server says it is out of range. */
-const API_VERSION = "7.0";
+export const API_VERSION = "7.0";
 /** ConnectionData and policy evaluations were never released, only previewed. */
 const API_PREVIEW_VERSION = "7.0-preview";
 
