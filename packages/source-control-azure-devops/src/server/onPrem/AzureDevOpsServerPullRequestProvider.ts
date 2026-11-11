@@ -14,10 +14,13 @@ import {
   type PullRequestProviderApi,
   type PullRequestProviderFailure,
 } from "@t3tools/source-control-core/server/PullRequestProvider";
+import { removeAgentCredits } from "@t3tools/source-control-core/server/mergeMessage";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Result from "effect/Result";
+import * as Schedule from "effect/Schedule";
+import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 
 import * as ServerDefinition from "../../shared/serverDefinition.ts";
@@ -48,8 +51,11 @@ import {
   decodeChecks,
   decodeCommits,
   decodeConnectionData,
+  decodeIdentityIds,
   decodeMergeCapabilities,
   decodePullRequest,
+  decodeRefObjectId,
+  decodeRefUpdateFailure,
   decodeThreads,
   pendingReviewerLogins,
   pullRequestUpdatedAt,
@@ -58,6 +64,7 @@ import {
 } from "./azureDevOpsServerJson.ts";
 
 const KIND = ServerDefinition.definition.kind;
+const isProviderError = Schema.is(PullRequestProviderError);
 
 const DIFF_FILE_CONCURRENCY = 4;
 const MAX_ITEM_READS = 2 * DIFF_FILE_CONCURRENCY;
@@ -70,19 +77,23 @@ const VIEWER_TTL_MS = 5 * 60_000;
 const CLOSED_ACTIVITY_TTL_MS = 10 * 60_000;
 const CLOSED_ACTIVITY_CAPACITY = 512;
 const MAX_LIST_PAGES = 5;
+const COMPLETION_POLL = "500 millis";
+const COMPLETION_POLLS = 10;
 
 const CAPABILITIES: PullRequestCapabilities = {
   diff: true,
   comment: false,
   actions: [...ServerDefinition.definition.changeRequestActions],
-  mergeMethods: [],
+  mergeMethods: ["merge", "squash", "rebase"],
+  deleteBranch: true,
   search: false,
   reactions: false,
   mentions: false,
   referenceSigils: [],
   review: { inlineComment: false, rangeComment: false, reply: false, resolve: false, verdicts: [] },
-  reviewers: { request: false, listCandidates: false, searchCandidates: false },
-  edit: { changeRequest: false, comment: false },
+  // Identity search on Azure DevOps Server matches whole names only, so there is no picker yet.
+  reviewers: { request: true, listCandidates: false, searchCandidates: false },
+  edit: { changeRequest: true, comment: false },
   // Azure's own viewed marks use an undocumented route and reset on every push.
   viewedFiles: "environment",
 };
@@ -520,12 +531,154 @@ export const make = Effect.gen(function* () {
       })),
     );
 
+  /** An account name such as `DOMAIN\user`, which identity search matches only whole. */
+  const identityIdOf = Effect.fn("AzureDevOpsServerPullRequestProvider.identityIdOf")(function* (
+    server: string,
+    login: string,
+  ) {
+    const rows = yield* api.requestList({
+      server,
+      operation: "setReviewerRequest",
+      path: "_apis/identities",
+      query: {
+        searchFilter: login.includes("\\") ? "AccountName" : "General",
+        filterValue: login,
+        queryMembership: "None",
+      },
+    });
+    const id = decodeIdentityIds(rows)[0];
+    if (id !== undefined) return id;
+    return yield* new AzureDevOpsServerApi.AzureDevOpsServerApiError({
+      server,
+      operation: "setReviewerRequest",
+      status: null,
+      reason: "not-found",
+      detail: `No one named ${login} on this server.`,
+    });
+  });
+
+  const completionOptions = (
+    pullRequest: ServerPullRequest,
+    input: Parameters<PullRequestProviderApi["runAction"]>[0],
+  ) => ({
+    mergeStrategy:
+      input.mergeMethod === "squash"
+        ? "squash"
+        : input.mergeMethod === "rebase"
+          ? "rebase"
+          : "noFastForward",
+    // Azure's own message for a completed pull request, minus agent credits when asked.
+    ...(input.removeAgentCreditsOnMerge === true
+      ? {
+          mergeCommitMessage: removeAgentCredits(
+            `Merged PR ${pullRequest.number}: ${pullRequest.title}\n\n${pullRequest.body}`,
+          ).trim(),
+        }
+      : {}),
+  });
+
+  const actionBody = Effect.fn("AzureDevOpsServerPullRequestProvider.actionBody")(function* (
+    target: ServerRepositoryRef,
+    pullRequest: ServerPullRequest,
+    input: Parameters<PullRequestProviderApi["runAction"]>[0],
+  ) {
+    switch (input.action) {
+      case "ready":
+        return { isDraft: false };
+      case "draft":
+        return { isDraft: true };
+      case "close":
+        return { status: "abandoned" };
+      case "reopen":
+        return { status: "active" };
+      case "merge": {
+        if (pullRequest.headSha === null) {
+          return yield* unreadable(
+            target.server,
+            "runAction:merge",
+            "The pull request names no head commit.",
+          );
+        }
+        // The head the reader saw, so a push since then fails the completion instead of landing.
+        return {
+          status: "completed",
+          lastMergeSourceCommit: { commitId: pullRequest.headSha },
+          completionOptions: completionOptions(pullRequest, input),
+        };
+      }
+      case "enable-auto-merge": {
+        const viewer = yield* viewerOf(target.server);
+        return {
+          autoCompleteSetBy: { id: viewer.id },
+          completionOptions: completionOptions(pullRequest, input),
+        };
+      }
+      case "disable-auto-merge":
+        return { autoCompleteSetBy: { id: "00000000-0000-0000-0000-000000000000" } };
+      default:
+        return yield* new PullRequestProviderError({
+          provider: KIND,
+          operation: "runAction",
+          reason: "failed",
+          detail: `Azure DevOps Server cannot ${input.action} here.`,
+        });
+    }
+  });
+
+  const awaitCompletion = (target: ServerRepositoryRef, number: number, operation: string) =>
+    readPullRequest(target, number, operation).pipe(
+      Effect.repeat({
+        schedule: Schedule.spaced(COMPLETION_POLL),
+        times: COMPLETION_POLLS,
+        until: (pullRequest) =>
+          pullRequest.state !== "open" || pullRequest.mergeability === "conflicting",
+      }),
+    );
+
+  /** Deleting a ref names the commit it points at, so a branch pushed to since stays. */
+  const deleteSourceBranch = Effect.fn("AzureDevOpsServerPullRequestProvider.deleteSourceBranch")(
+    function* (target: ServerRepositoryRef, pullRequest: ServerPullRequest, operation: string) {
+      const refs = yield* api.requestList({
+        server: target.server,
+        operation,
+        path: `${repositoryPath(target)}/refs`,
+        query: { filter: `heads/${pullRequest.headBranch}` },
+      });
+      const objectId = decodeRefObjectId(refs, `refs/heads/${pullRequest.headBranch}`);
+      if (objectId === null) return;
+      const results = yield* api.request({
+        server: target.server,
+        operation,
+        method: "POST",
+        path: `${repositoryPath(target)}/refs`,
+        body: [
+          {
+            name: `refs/heads/${pullRequest.headBranch}`,
+            oldObjectId: objectId,
+            newObjectId: "0000000000000000000000000000000000000000",
+          },
+        ],
+      });
+      const failure = decodeRefUpdateFailure(results);
+      if (failure !== null) {
+        return yield* new AzureDevOpsServerApi.AzureDevOpsServerApiError({
+          server: target.server,
+          operation,
+          status: null,
+          reason: "forbidden",
+          detail: `The server kept ${pullRequest.headBranch}: ${failure}.`,
+        });
+      }
+    },
+  );
+
   const provider: PullRequestProviderApi = {
     kind: KIND,
     capabilities: CAPABILITIES,
     unavailableRequirement: UNAVAILABLE_REQUIREMENT,
     // Repository names repeat across projects and collections; the full path does not.
     repositoryKey: ({ canonicalKey }) => canonicalKey,
+    mergeMessageRewrite: removeAgentCredits,
 
     getViewer: Effect.fn("AzureDevOpsServerPullRequestProvider.getViewer")(function* (input) {
       // The checkout's own collection, so a broken token elsewhere on the host cannot hide it.
@@ -908,9 +1061,90 @@ export const make = Effect.gen(function* () {
         }
       }),
 
-    runAction: () => unsupported("runAction"),
+    runAction: Effect.fn("AzureDevOpsServerPullRequestProvider.runAction")(
+      function* (input) {
+        const target = yield* locate(input);
+        const operation = `runAction:${input.action}`;
+        const pullRequest = yield* readPullRequest(target, input.number, operation);
+        if (input.action === "delete-branch") {
+          yield* deleteSourceBranch(target, pullRequest, operation);
+          return;
+        }
+        const body = yield* actionBody(target, pullRequest, input);
+        const reply = decodePullRequest(
+          target.server,
+          yield* api.request({
+            server: target.server,
+            operation,
+            method: "PATCH",
+            path: pullRequestPath(target, input.number),
+            body,
+          }),
+        );
+        if (reply === null) return;
+        // Azure completes in the background; answering with the still-active reply would show
+        // the pull request open after its merge.
+        const settled =
+          input.action === "merge" && reply.state === "open"
+            ? yield* awaitCompletion(target, input.number, operation)
+            : reply;
+        // The change adds a system thread, which dates the reply as later reads will.
+        const threads = yield* readThreads(target, settled, operation).pipe(Effect.option);
+        if (threads._tag === "None") return;
+        return toSummary(settled, yield* datedBy(target, settled, threads.value.lastUpdatedAt));
+      },
+      Effect.mapError((error) => (isProviderError(error) ? error : fail("runAction")(error))),
+    ),
+
+    updateChangeRequest: Effect.fn("AzureDevOpsServerPullRequestProvider.updateChangeRequest")(
+      function* (input) {
+        const target = yield* locate(input);
+        yield* api.request({
+          server: target.server,
+          operation: "updateChangeRequest",
+          method: "PATCH",
+          path: pullRequestPath(target, input.number),
+          body: {
+            ...(input.title === undefined ? {} : { title: input.title }),
+            ...(input.body === undefined ? {} : { description: input.body }),
+          },
+        });
+      },
+      Effect.mapError(fail("updateChangeRequest")),
+    ),
+
     listReviewerCandidates: () => unsupported("listReviewerCandidates"),
-    setReviewerRequest: () => unsupported("setReviewerRequest"),
+
+    setReviewerRequest: Effect.fn("AzureDevOpsServerPullRequestProvider.setReviewerRequest")(
+      function* (input) {
+        const target = yield* locate(input);
+        const pullRequest = yield* readPullRequest(target, input.number, "setReviewerRequest");
+        for (const reviewer of input.reviewers) {
+          const known = pullRequest.reviewers.find(
+            (candidate) =>
+              candidate.id === reviewer.id ||
+              candidate.login.toLowerCase() === reviewer.id.toLowerCase(),
+          );
+          const id = known?.id ?? (yield* identityIdOf(target.server, reviewer.id));
+          const path = `${pullRequestPath(target, input.number)}/reviewers/${AzureDevOpsServerApi.encodePath(id)}`;
+          yield* input.requested
+            ? api.request({
+                server: target.server,
+                operation: "setReviewerRequest",
+                method: "PUT",
+                path,
+                body: { vote: known?.vote ?? 0 },
+              })
+            : api.request({
+                server: target.server,
+                operation: "setReviewerRequest",
+                method: "DELETE",
+                path,
+              });
+        }
+      },
+      Effect.mapError(fail("setReviewerRequest")),
+    ),
     comment: () => unsupported("comment"),
     submitReview: () => unsupported("submitReview"),
     replyToThread: () => unsupported("replyToThread"),

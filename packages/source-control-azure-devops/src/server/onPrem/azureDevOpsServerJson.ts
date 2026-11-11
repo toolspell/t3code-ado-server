@@ -620,3 +620,31 @@ export function decodeAccountName(rows: ReadonlyArray<unknown>): string | null {
   if (account === null) return null;
   return domain === null ? account : `${domain}\\${account}`;
 }
+
+const RawRef = Schema.Struct({ name: Schema.String, objectId: Schema.String });
+
+/** The commit `name` points at, or null when the server lists no such ref. */
+export function decodeRefObjectId(rows: ReadonlyArray<unknown>, name: string): string | null {
+  return decodeEach(RawRef, rows).find((ref) => ref.name === name)?.objectId ?? null;
+}
+
+const RawRefUpdate = Schema.Struct({
+  success: OptionalBoolean,
+  updateStatus: OptionalString,
+  customMessage: OptionalString,
+});
+
+/** Why a ref update the server answered was refused, or null when every update succeeded. */
+export function decodeRefUpdateFailure(body: unknown): string | null {
+  const rows =
+    typeof body === "object" && body !== null && "value" in body && Array.isArray(body.value)
+      ? body.value
+      : [];
+  const failed = decodeEach(RawRefUpdate, rows).find((update) => update.success === false);
+  if (failed === undefined) return null;
+  return trimmed(failed.customMessage) ?? trimmed(failed.updateStatus) ?? "refused";
+}
+
+export function decodeIdentityIds(rows: ReadonlyArray<unknown>): ReadonlyArray<string> {
+  return decodeEach(RawIdentityRecord, rows).map((identity) => identity.id);
+}
