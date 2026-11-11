@@ -200,6 +200,27 @@ export interface SourceControlAppSignIn {
   readonly revokeUrl: string;
 }
 
+/**
+ * For a host users add servers of by URL, each with its own token kept in
+ * `serverCredentialSettingsFields`. Clients show a server list for it instead of the generic form.
+ */
+export interface SourceControlServers {
+  /** What a server's URL names, as `Collection URL`. */
+  readonly urlLabel: string;
+  readonly urlPlaceholder: string;
+  /** Where the URL has to end, in a sentence. */
+  readonly urlHint: string;
+  readonly tokenLabel: string;
+  /** Where the user creates a token on the server at `serverUrl`. */
+  readonly newTokenUrl: (serverUrl: string) => string;
+  /** The access a token needs, named as the server's token page names it. */
+  readonly tokenScopes: ReadonlyArray<{
+    readonly scope: string;
+    readonly usedFor: string;
+    readonly required: boolean;
+  }>;
+}
+
 export const SourceControlHostName = TrimmedNonEmptyString.pipe(
   Schema.decodeTo(Schema.String, SchemaTransformation.toLowerCase()),
 );
@@ -240,6 +261,9 @@ export const serverCredentialSettingsFields = {
   tokens: hostCredentialSettingsFields.tokens,
 };
 
+export const ServerCredentialSettings = Schema.Struct(serverCredentialSettingsFields);
+export type ServerCredentialSettings = typeof ServerCredentialSettings.Type;
+
 /**
  * A self-hosted server's base URL as a settings key: lower case, without credentials, query,
  * hash or trailing slash. Null when `value` is not an http or https URL.
@@ -268,6 +292,7 @@ export interface SourceControlDefinition {
   /** Further words settings search finds this host by, besides its label. */
   readonly searchKeywords?: ReadonlyArray<string>;
   readonly credentials?: SourceControlHostCredentials;
+  readonly servers?: SourceControlServers;
   readonly changeRequest: ChangeRequestTerminology;
   readonly repositoryPathHint: string;
   readonly publicHost: string | null;

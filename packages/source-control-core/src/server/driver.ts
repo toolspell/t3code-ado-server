@@ -1,5 +1,7 @@
 import type {
   SourceControlAppAccess,
+  SourceControlCheckServerError,
+  SourceControlCheckServerResult,
   SourceControlProviderKind,
   SourceControlSignInError,
   SourceControlSignInPrompt,
@@ -65,6 +67,14 @@ export interface SourceControlDriverInstance {
     Scope.Scope
   >;
   readonly signIn?: SourceControlSignIn;
+  /**
+   * Signs in to a server the definition's `servers` lets users add, with `token` or, when absent,
+   * the one saved for `url`. Saves nothing.
+   */
+  readonly checkServer?: (input: {
+    readonly url: string;
+    readonly token: string | undefined;
+  }) => Effect.Effect<SourceControlCheckServerResult, SourceControlCheckServerError>;
   /** Whether the server's account on `host` starred `repository` (`owner/name`). */
   readonly isRepositoryStarred?: (host: string, repository: string) => Effect.Effect<boolean>;
   /** Stars `repository` as the server's account on `host`; false when the forge refused. */

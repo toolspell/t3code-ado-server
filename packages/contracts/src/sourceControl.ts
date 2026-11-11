@@ -1,5 +1,6 @@
 import * as Schema from "effect/Schema";
 import { PositiveInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { SettingsSecretValue } from "./settingsSecretValue.ts";
 import { VcsDriverKind } from "./vcs.ts";
 
 /** Accept unknown hosts so clients can fall back to generic presentation. */
@@ -241,6 +242,52 @@ export class SourceControlSignInError extends Schema.TaggedError<SourceControlSi
     reason: SourceControlSignInFailure,
     detail: Schema.String,
     cause: Schema.optional(Schema.Defect()),
+  },
+) {
+  override get message(): string {
+    return this.detail;
+  }
+}
+
+/** A self-hosted server and a token to check before saving them. */
+export const SourceControlCheckServerInput = Schema.Struct({
+  provider: SourceControlProviderKind,
+  url: TrimmedNonEmptyString,
+  /** Absent checks the token saved for `url`. */
+  token: Schema.optional(SettingsSecretValue),
+});
+export type SourceControlCheckServerInput = typeof SourceControlCheckServerInput.Type;
+
+export const SourceControlCheckServerResult = Schema.Struct({
+  /** The URL as Settings keys it. */
+  url: TrimmedNonEmptyString,
+  account: TrimmedNonEmptyString,
+});
+export type SourceControlCheckServerResult = typeof SourceControlCheckServerResult.Type;
+
+export const SourceControlCheckServerFailure = Schema.Literals([
+  "unsupported",
+  "invalid-url",
+  "not-configured",
+  "unreachable",
+  "untrusted-certificate",
+  "unauthenticated",
+  "forbidden",
+  "wrong-server",
+  "unsupported-server",
+  "failed",
+]);
+export type SourceControlCheckServerFailure = typeof SourceControlCheckServerFailure.Type;
+
+export class SourceControlCheckServerError extends Schema.TaggedError<SourceControlCheckServerError>()(
+  "SourceControlCheckServerError",
+  {
+    provider: SourceControlProviderKind,
+    url: Schema.String,
+    reason: SourceControlCheckServerFailure,
+    detail: Schema.String,
+    /** URLs to offer instead, such as a server's collections when the URL named none. */
+    suggestions: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
   },
 ) {
   override get message(): string {

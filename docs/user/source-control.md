@@ -1,7 +1,7 @@
 # Source control
 
-T3 Code integrates with GitHub, GitLab, Forgejo, Gitea, Bitbucket, Azure DevOps, GitCafe, and Cursor
-Origin to clone and publish repositories, create pull requests, and review changes.
+T3 Code integrates with GitHub, GitLab, Forgejo, Gitea, Bitbucket, Azure DevOps, Azure DevOps Server,
+GitCafe, and Cursor Origin to clone and publish repositories, create pull requests, and review changes.
 
 ## Review turn changes
 
@@ -110,6 +110,27 @@ Install [Azure CLI](https://learn.microsoft.com/en-us/cli/azure/), add the DevOp
 az extension add --name azure-devops
 az login
 ```
+
+### Azure DevOps Server
+
+For Azure DevOps Server 2022 or newer on your own network. T3 Code talks to the server's REST API
+with a personal access token and does not need Azure CLI.
+
+1. On the server, open **User settings → Personal access tokens** and create a token with
+   **Code: Read & write** and **Identity: Read**.
+2. In T3 Code, open **Settings → Source control**, expand **Azure DevOps Server**, and choose
+   **Add server**.
+3. Enter the collection URL, the address up to and including the collection as your clone URLs
+   show it, such as `https://tfs.example.com/DefaultCollection`. Paste the token and choose **Test
+   connection**, then **Add server**.
+
+Add one entry per collection. Repositories whose remote points at that collection, over HTTPS or
+SSH, then show their pull requests. Tokens are kept in the server's secret store; to replace one,
+choose **Edit**.
+
+If the server uses a certificate from your company's or its own certificate authority, install that
+certificate in the operating system's certificate store on the machine running T3 Code, or point
+`NODE_EXTRA_CA_CERTS` at it and restart T3 Code.
 
 ### GitCafe
 

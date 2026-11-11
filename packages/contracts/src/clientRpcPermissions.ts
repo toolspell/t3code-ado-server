@@ -49,6 +49,8 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
   [WS_METHODS.sourceControlSignInStart]: AuthSettingsWriteScope,
   [WS_METHODS.sourceControlSignInWait]: AuthSettingsWriteScope,
   [WS_METHODS.sourceControlSignInCancel]: AuthSettingsWriteScope,
+  // Sends a candidate token from this environment to a server of the user's choosing.
+  [WS_METHODS.sourceControlCheckServer]: AuthSettingsWriteScope,
   [WS_METHODS.projectCloneStart]: AuthSourceControlWriteScope,
   [WS_METHODS.projectCloneCancel]: AuthSourceControlWriteScope,
   [WS_METHODS.projectCloneRetry]: AuthSourceControlWriteScope,
