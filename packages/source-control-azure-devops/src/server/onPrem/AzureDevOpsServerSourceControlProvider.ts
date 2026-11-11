@@ -155,7 +155,7 @@ export const make = Effect.gen(function* () {
     readonly repository: string;
   }) {
     const { target, remote } = yield* targetOf(input);
-    if (input.repository.toLowerCase().includes("_git")) {
+    if (input.repository.toLowerCase().split("/").includes("_git")) {
       const hostname = parseGitRemoteHost(remote.url)?.hostname ?? "";
       return yield* api.resolveRepository({ host: hostname, path: input.repository });
     }

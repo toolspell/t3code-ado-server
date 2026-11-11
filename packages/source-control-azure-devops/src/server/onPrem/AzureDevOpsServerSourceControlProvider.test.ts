@@ -105,5 +105,7 @@ it.effect("looks up the repository asked for in the checkout's collection", () =
     // A bare name is a repository in the checkout's project.
     yield* provider.getRepositoryCloneUrls({ cwd: "/repo", repository: "Api" });
     assert.strictEqual(paths.at(-1), "DemoProjectTwo/_apis/git/repositories/Api");
+    yield* provider.getRepositoryCloneUrls({ cwd: "/repo", repository: "my_git_tools" });
+    assert.strictEqual(paths.at(-1), "DemoProjectTwo/_apis/git/repositories/my_git_tools");
   }).pipe(Effect.provide(layer));
 });
