@@ -386,7 +386,68 @@ function toRepositoryPath(value: string | null | undefined): string | null {
   return path.length === 0 ? null : path;
 }
 
-export function decodeThreads(rows: ReadonlyArray<unknown>, pullRequestUrl: string): ServerThreads {
+/** Azure stores a mention as `@<identity id>`; the names fill in once read. */
+const MENTION = /@<([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})>/giu;
+
+export function mentionedIdentityIds(threads: ServerThreads): ReadonlyArray<string> {
+  const ids = new Set<string>();
+  for (const comment of threads.comments) {
+    for (const match of comment.body.matchAll(MENTION)) ids.add(match[1]!.toLowerCase());
+  }
+  return [...ids];
+}
+
+/** `@<id>` as `@Display Name` for the identities `names` knows, the rest as written. */
+export function withMentionNames(
+  threads: ServerThreads,
+  names: ReadonlyMap<string, string>,
+): ServerThreads {
+  if (names.size === 0) return threads;
+  const named = <C extends { readonly body: string }>(comment: C): C => ({
+    ...comment,
+    body: comment.body.replace(MENTION, (written, id: string) => {
+      const name = names.get(id.toLowerCase());
+      return name === undefined ? written : `@${name}`;
+    }),
+  });
+  return {
+    ...threads,
+    comments: threads.comments.map(named),
+    reviewThreads: threads.reviewThreads.map((thread) => ({
+      ...thread,
+      comments: thread.comments.map(named),
+    })),
+    overviewThreads: threads.overviewThreads.map((thread) => ({
+      ...thread,
+      comments: thread.comments.map(named),
+    })),
+  };
+}
+
+export function decodeIdentityNames(rows: ReadonlyArray<unknown>): ReadonlyMap<string, string> {
+  return new Map(
+    decodeEach(RawIdentityRecord, rows).flatMap((identity) => {
+      const name = trimmed(identity.providerDisplayName);
+      return name === null ? [] : [[identity.id.toLowerCase(), name] as const];
+    }),
+  );
+}
+
+/** The comment a reply in thread `rows` answers: its first, the one that started it. */
+export function decodeRootCommentId(thread: unknown): number | null {
+  const [decoded] = decodeEach(RawThread, [thread]);
+  const ids = (decoded?.comments ?? [])
+    .filter((comment) => (comment.parentCommentId ?? 0) === 0)
+    .map((comment) => comment.id);
+  return ids.length === 0 ? null : Math.min(...ids);
+}
+
+export function decodeThreads(
+  rows: ReadonlyArray<unknown>,
+  pullRequestUrl: string,
+  /** Set to mark which comments the viewer may edit: their own. */
+  viewerId?: string,
+): ServerThreads {
   const comments: PullRequestComment[] = [];
   const reviewThreads: PullRequestReviewThread[] = [];
   const overviewThreads: PullRequestOverviewThread[] = [];
@@ -417,6 +478,9 @@ export function decodeThreads(rows: ReadonlyArray<unknown>, pullRequestUrl: stri
         createdAt,
         ...(editedAt !== null && editedAt !== createdAt ? { editedAt } : {}),
         url,
+        ...(viewerId === undefined
+          ? {}
+          : { canEdit: comment.author?.id?.toLowerCase() === viewerId.toLowerCase() }),
       };
       threadComments.push(shared);
       comments.push({

@@ -1,4 +1,4 @@
-import { assert, it } from "@effect/vitest";
+import { assert, describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -388,6 +388,110 @@ it.effect("marks checks it could not list instead of passing on the rest", () =>
       [
         ["deploy", "success", false],
         ["Branch policies", "pending", true],
+      ],
+    );
+  }).pipe(Effect.provide(layer));
+});
+
+describe("threadContextOf", () => {
+  it.each([
+    [
+      "an added range",
+      { kind: "added", newLine: 5 },
+      { kind: "added", newLine: 3 },
+      { rightFileStart: { line: 3, offset: 1 }, rightFileEnd: { line: 5, offset: 100_000 } },
+    ],
+    [
+      "a deleted line on the old path",
+      { kind: "deleted", oldLine: 9 },
+      undefined,
+      { leftFileStart: { line: 9, offset: 1 }, leftFileEnd: { line: 9, offset: 100_000 } },
+    ],
+    [
+      "a range across sides, kept to its last line",
+      { kind: "context", oldLine: 4, newLine: 6, side: "right" },
+      { kind: "deleted", oldLine: 2 },
+      { rightFileStart: { line: 6, offset: 1 }, rightFileEnd: { line: 6, offset: 100_000 } },
+    ],
+  ] as const)("covers %s", (_, position, startPosition, lines) => {
+    const context = AzureDevOpsServerPullRequestProvider.threadContextOf({
+      path: "src/new.ts",
+      oldPath: "src/old.ts",
+      position,
+      ...(startPosition === undefined ? {} : { startPosition }),
+      body: "x",
+    });
+    const { filePath, ...rest } = context;
+    expect(filePath).toBe(position.kind === "deleted" ? "/src/old.ts" : "/src/new.ts");
+    expect(rest).toEqual(lines);
+  });
+});
+
+it.effect("posts a review's comments, then votes for the viewer", () => {
+  const { layer, calls } = makeLayer({ pullRequests: [] });
+  return Effect.gen(function* () {
+    const provider = yield* AzureDevOpsServerPullRequestProvider.make;
+    yield* provider.submitReview({
+      ...ref,
+      number: 26,
+      verdict: "request-changes",
+      body: "Needs tests.",
+      comments: [{ path: "src/store.js", position: { kind: "added", newLine: 3 }, body: "Why?" }],
+    });
+    yield* provider.submitReview({
+      ...ref,
+      number: 26,
+      verdict: "approve",
+      body: "",
+      comments: [],
+    });
+    assert.deepStrictEqual(
+      writes(calls).map((call) => [call.method, call.path, (call.body as { vote?: number }).vote]),
+      [
+        ["POST", `${BASE}/pullRequests/26/threads`, undefined],
+        ["POST", `${BASE}/pullRequests/26/threads`, undefined],
+        ["PUT", `${BASE}/pullRequests/26/reviewers/viewer-id`, -5],
+        ["PUT", `${BASE}/pullRequests/26/reviewers/viewer-id`, 10],
+      ],
+    );
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("replies under a thread's first comment and resolves it", () => {
+  const { layer, calls } = makeLayer({
+    pullRequests: [],
+    answer: (input) =>
+      input.path === `${BASE}/pullRequests/26/threads/7` && input.method === undefined
+        ? {
+            id: 7,
+            comments: [
+              { id: 4, parentCommentId: 0 },
+              { id: 5, parentCommentId: 4 },
+            ],
+          }
+        : undefined,
+  });
+  return Effect.gen(function* () {
+    const provider = yield* AzureDevOpsServerPullRequestProvider.make;
+    yield* provider.replyToThread({ ...ref, number: 26, threadId: "7", body: "Done." });
+    yield* provider.setThreadResolution({ ...ref, number: 26, threadId: "7", resolved: true });
+    yield* provider.updateComment!({
+      ...ref,
+      number: 26,
+      commentId: "7:5",
+      kind: "review-comment",
+      body: "Done, see 3f2a.",
+    });
+    assert.deepStrictEqual(
+      writes(calls).map((call) => [call.method, call.path, call.body]),
+      [
+        [
+          "POST",
+          `${BASE}/pullRequests/26/threads/7/comments`,
+          { parentCommentId: 4, content: "Done.", commentType: 1 },
+        ],
+        ["PATCH", `${BASE}/pullRequests/26/threads/7`, { status: "fixed" }],
+        ["PATCH", `${BASE}/pullRequests/26/threads/7/comments/5`, { content: "Done, see 3f2a." }],
       ],
     );
   }).pipe(Effect.provide(layer));

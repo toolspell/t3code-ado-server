@@ -2,12 +2,16 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   decodeAccountName,
+  decodeIdentityNames,
+  decodeRootCommentId,
   decodeChecks,
   decodeMergeCapabilities,
   decodePullRequest,
   decodeThreads,
+  mentionedIdentityIds,
   pullRequestUpdatedAt,
   reviewDecisionOf,
+  withMentionNames,
 } from "./azureDevOpsServerJson.ts";
 
 const COLLECTION = "https://ado2022.fritz.box/defaultcollection";
@@ -294,5 +298,49 @@ describe("decodeAccountName", () => {
         },
       ]),
     ).toBe("ADO2022\\hwalker");
+  });
+});
+
+describe("mentions, edit rights and replies", () => {
+  const url = `${COLLECTION}/P/_git/R/pullrequest/25`;
+  const harry = "b5ffda4b-fec4-4076-8beb-cb83409a5469";
+  const rows = [
+    {
+      id: 7,
+      comments: [
+        {
+          id: 1,
+          parentCommentId: 0,
+          content: `Can you look, @<${harry.toUpperCase()}>?`,
+          publishedDate: "2026-11-11T14:00:00Z",
+          author: { id: "max-id", uniqueName: "ADO2022\\max" },
+        },
+        {
+          id: 2,
+          parentCommentId: 1,
+          content: "Sure.",
+          publishedDate: "2026-11-11T14:01:00Z",
+          author: { id: harry, uniqueName: "ADO2022\\hwalker" },
+        },
+      ],
+    },
+  ];
+
+  it("names mentioned identities and lets the viewer edit their own comments", () => {
+    const threads = decodeThreads(rows, url, harry);
+    expect(mentionedIdentityIds(threads)).toEqual([harry]);
+    const named = withMentionNames(
+      threads,
+      decodeIdentityNames([{ id: harry.toUpperCase(), providerDisplayName: "Harry Walker" }]),
+    );
+    expect(named.comments.map((comment) => [comment.body, comment.canEdit])).toEqual([
+      ["Can you look, @Harry Walker?", false],
+      ["Sure.", true],
+    ]);
+    expect(named.overviewThreads[0]?.comments[0]?.body).toBe("Can you look, @Harry Walker?");
+  });
+
+  it("replies to the comment that started a thread", () => {
+    expect(decodeRootCommentId(rows[0])).toBe(1);
   });
 });
