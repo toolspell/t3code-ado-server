@@ -8,33 +8,26 @@ import * as Option from "effect/Option";
 
 import * as AzureDevOpsServerApi from "./AzureDevOpsServerApi.ts";
 import * as AzureDevOpsServerSourceControlProvider from "./AzureDevOpsServerSourceControlProvider.ts";
+import { matchServerRepository } from "./azureDevOpsServerConnections.ts";
 
 const SERVER = "https://ado2022.fritz.box/defaultcollection";
 const checkout = { server: SERVER, project: "DemoProjectTwo", repository: "DemoProjectTwo" };
+const pullRequest = {
+  pullRequestId: 26,
+  title: "Safe writes",
+  status: "active",
+  creationDate: "2026-11-10T08:00:00Z",
+  sourceRefName: "refs/heads/feature/26",
+  targetRefName: "refs/heads/main",
+  repository: { id: "r", name: "DemoProjectTwo", project: { id: "p", name: "DemoProjectTwo" } },
+};
 
 function makeLayer() {
   const paths: string[] = [];
   const answer = (input: AzureDevOpsServerApi.AzureDevOpsServerRequest): unknown => {
     paths.push(input.path);
-    if (input.path.endsWith("/pullrequests")) {
-      return {
-        value: [
-          {
-            pullRequestId: 26,
-            title: "Safe writes",
-            status: "active",
-            creationDate: "2026-11-10T08:00:00Z",
-            sourceRefName: "refs/heads/feature/26",
-            targetRefName: "refs/heads/main",
-            repository: {
-              id: "r",
-              name: "DemoProjectTwo",
-              project: { id: "p", name: "DemoProjectTwo" },
-            },
-          },
-        ],
-      };
-    }
+    if (input.path.endsWith("/pullrequests")) return { value: [pullRequest] };
+    if (input.path.endsWith("/pullRequests/26")) return pullRequest;
     if (input.path.endsWith("/threads")) {
       return { value: [{ id: 1, lastUpdatedDate: "2026-11-11T14:09:18Z", comments: [] }] };
     }
@@ -48,7 +41,10 @@ function makeLayer() {
   };
   const api = AzureDevOpsServerApi.AzureDevOpsServerApi.of({
     servers: Effect.succeed([SERVER]),
-    resolveRepository: () => Effect.succeed(checkout),
+    resolveRepository: ({ host, path }) => {
+      const match = matchServerRepository([SERVER], host, path);
+      return match === null ? Effect.die(`unconfigured ${path}`) : Effect.succeed(match);
+    },
     resolveCheckout: () =>
       Effect.succeed({
         target: checkout,
@@ -107,5 +103,26 @@ it.effect("looks up the repository asked for in the checkout's collection", () =
     assert.strictEqual(paths.at(-1), "DemoProjectTwo/_apis/git/repositories/Api");
     yield* provider.getRepositoryCloneUrls({ cwd: "/repo", repository: "my_git_tools" });
     assert.strictEqual(paths.at(-1), "DemoProjectTwo/_apis/git/repositories/my_git_tools");
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("reads a pull request URL only in the repository it names", () => {
+  const { layer, paths } = makeLayer();
+  return Effect.gen(function* () {
+    const provider = yield* AzureDevOpsServerSourceControlProvider.make;
+    const at = (repository: string) =>
+      provider
+        .getChangeRequest({
+          cwd: "/repo",
+          reference: `https://ado2022.fritz.box/DefaultCollection/${repository}/pullrequest/26`,
+        })
+        .pipe(Effect.result);
+    const own = yield* at("DemoProjectTwo/_git/DemoProjectTwo");
+    assert.strictEqual(own._tag === "Success" ? own.success.number : null, 26);
+    const reads = paths.length;
+    // The same number in another repository is another pull request.
+    const other = yield* at("Payments/_git/Api");
+    assert.strictEqual(other._tag, "Failure");
+    assert.strictEqual(paths.length, reads);
   }).pipe(Effect.provide(layer));
 });

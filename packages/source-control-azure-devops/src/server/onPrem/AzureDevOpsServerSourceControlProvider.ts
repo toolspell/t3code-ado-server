@@ -67,16 +67,10 @@ function toChangeRequest(pullRequest: ServerPullRequest, updatedAt: string): Cha
   };
 }
 
-/** A pull request number, `#12`, or a pull request URL. */
-function pullRequestNumberOf(reference: string): number | null {
-  const trimmed = reference.trim();
-  const url = URL.parse(trimmed);
-  const number =
-    url === null
-      ? Number(trimmed.replace(/^#/u, ""))
-      : (ServerDefinition.definition.parseChangeRequestUrl(url)?.number ?? Number.NaN);
-  return Number.isSafeInteger(number) && number > 0 ? number : null;
-}
+const sameRepository = (left: ServerRepositoryRef, right: ServerRepositoryRef) =>
+  left.server === right.server &&
+  left.project.toLowerCase() === right.project.toLowerCase() &&
+  left.repository.toLowerCase() === right.repository.toLowerCase();
 
 export const make = Effect.gen(function* () {
   const api = yield* AzureDevOpsServerApi.AzureDevOpsServerApi;
@@ -163,7 +157,27 @@ export const make = Effect.gen(function* () {
 
   const readPullRequest = Effect.fn("AzureDevOpsServerSourceControlProvider.readPullRequest")(
     function* (target: ServerRepositoryRef, reference: string, operation: string) {
-      const number = pullRequestNumberOf(reference);
+      const trimmed = reference.trim();
+      const url = URL.parse(trimmed);
+      const link = url === null ? null : ServerDefinition.definition.parseChangeRequestUrl(url);
+      // A URL's number belongs to the repository it names, not to this checkout's.
+      if (
+        link !== null &&
+        !sameRepository(
+          yield* api.resolveRepository({ host: link.host, path: link.repository }),
+          target,
+        )
+      ) {
+        return yield* new AzureDevOpsServerApi.AzureDevOpsServerApiError({
+          server: target.server,
+          operation,
+          status: null,
+          reason: "not-found",
+          detail: "That pull request belongs to another repository than this checkout.",
+        });
+      }
+      const parsed = url === null ? Number(trimmed.replace(/^#/u, "")) : (link?.number ?? 0);
+      const number = Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
       const pullRequest =
         number === null
           ? null
