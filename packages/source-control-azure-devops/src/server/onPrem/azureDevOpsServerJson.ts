@@ -180,7 +180,7 @@ function decodeEach<A, I>(schema: Schema.Codec<A, I>, rows: ReadonlyArray<unknow
 }
 
 /** The newest of the given host times, normalized so the server can compare them as text. */
-export function latestTime(...times: ReadonlyArray<string | null | undefined>): string | null {
+function latestTime(...times: ReadonlyArray<string | null | undefined>): string | null {
   let latest: { readonly at: number; readonly value: string } | null = null;
   for (const time of times) {
     const value = trimmed(time);
@@ -249,9 +249,8 @@ function toMergeability(value: string | null | undefined): PullRequestMergeabili
   switch (value?.trim().toLowerCase()) {
     case "succeeded":
       return "mergeable";
+    // A policy rejection or a failed trial merge is not a conflict to resolve.
     case "conflicts":
-    case "failure":
-    case "rejectedbypolicy":
       return "conflicting";
     default:
       return "unknown";

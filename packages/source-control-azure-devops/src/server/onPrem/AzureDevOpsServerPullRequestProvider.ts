@@ -391,9 +391,12 @@ export const make = Effect.gen(function* () {
           },
         })
         .pipe(
-          Effect.map((text) => {
+          Effect.flatMap((text) => {
             const decoded = decodeItemContentJson(text);
-            return Result.isSuccess(decoded) ? decoded.success : EMPTY_ITEM;
+            // A false empty file would show the whole file as added or deleted.
+            return Result.isSuccess(decoded)
+              ? Effect.succeed(decoded.success)
+              : unreadable(target.server, operation, `${path} could not be read.`);
           }),
         ),
     );
@@ -476,13 +479,17 @@ export const make = Effect.gen(function* () {
     repositoryKey: ({ canonicalKey }) => canonicalKey,
 
     getViewer: Effect.fn("AzureDevOpsServerPullRequestProvider.getViewer")(function* (input) {
+      // The checkout's own collection, so a broken token elsewhere on the host cannot hide it.
+      const checkout = yield* api.resolveCheckout({ cwd: input.cwd }).pipe(Effect.option);
       const servers = yield* api.servers;
       const server =
-        servers.find(
-          (candidate) =>
-            input.host === undefined ||
-            URL.parse(candidate)?.hostname.toLowerCase() === input.host.toLowerCase(),
-        ) ?? null;
+        checkout._tag === "Some"
+          ? checkout.value.target.server
+          : (servers.find(
+              (candidate) =>
+                input.host === undefined ||
+                URL.parse(candidate)?.hostname.toLowerCase() === input.host.toLowerCase(),
+            ) ?? null);
       if (server === null) {
         return yield* new PullRequestProviderError({
           provider: KIND,

@@ -1,9 +1,12 @@
 import { requireSettingsSecretLiteral } from "@t3tools/contracts";
 import { retryAtFromHeader } from "@t3tools/source-control-core/server/SourceControlRateLimit";
 import * as SourceControlHost from "@t3tools/source-control-core/server/SourceControlHost";
+import * as SourceControlProvider from "@t3tools/source-control-core/server/SourceControlProvider";
 import {
   normalizeSourceControlServerUrl,
+  parseGitRemoteHost,
   readSourceControlHostSettings,
+  recognizeRemoteWith,
 } from "@t3tools/source-control-core/shared/definition";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -80,6 +83,17 @@ export class AzureDevOpsServerApi extends Context.Service<
       readonly host: string;
       readonly path: string;
     }) => Effect.Effect<ServerRepositoryRef, AzureDevOpsServerApiError>;
+    /** The configured server and repository a checkout's Azure DevOps Server remote names. */
+    readonly resolveCheckout: (input: {
+      readonly cwd: string;
+      readonly context?: SourceControlProvider.SourceControlProviderContext | undefined;
+    }) => Effect.Effect<
+      {
+        readonly target: ServerRepositoryRef;
+        readonly remote: { readonly name: string; readonly url: string };
+      },
+      AzureDevOpsServerApiError
+    >;
     /** The response body as text. */
     readonly requestText: (
       input: AzureDevOpsServerRequest,
@@ -261,6 +275,57 @@ export const make = Effect.gen(function* () {
     });
   });
 
+  const checkoutFailure = (cwd: string, detail: string, cause?: unknown) =>
+    new AzureDevOpsServerApiError({
+      server: cwd,
+      operation: "resolveCheckout",
+      status: null,
+      reason: "not-configured",
+      detail,
+      ...(cause === undefined ? {} : { cause }),
+    });
+
+  const resolveCheckout = Effect.fn("AzureDevOpsServerApi.resolveCheckout")(function* (input: {
+    readonly cwd: string;
+    readonly context?: SourceControlProvider.SourceControlProviderContext | undefined;
+  }) {
+    const remote =
+      input.context?.provider.kind === kind
+        ? { name: input.context.remoteName, url: input.context.remoteUrl }
+        : yield* host.git.remotes(input.cwd).pipe(
+            Effect.flatten,
+            Effect.mapError((cause) =>
+              checkoutFailure(input.cwd, "The checkout's remotes could not be read.", cause),
+            ),
+            Effect.map((listed) =>
+              listed.remotes.find(
+                (candidate) =>
+                  recognizeRemoteWith(ServerDefinition.definition, candidate.url) !== null,
+              ),
+            ),
+            Effect.flatMap((found) =>
+              found === undefined
+                ? Effect.fail(
+                    checkoutFailure(
+                      input.cwd,
+                      "No remote of this checkout is on an Azure DevOps Server.",
+                    ),
+                  )
+                : Effect.succeed({ name: found.name, url: found.url }),
+            ),
+          );
+    const remoteHost = parseGitRemoteHost(remote.url);
+    const path = SourceControlProvider.repositoryPathFromRemoteUrl(remote.url);
+    if (remoteHost === null || path === null) {
+      return yield* checkoutFailure(
+        input.cwd,
+        "The remote names no Azure DevOps Server repository.",
+      );
+    }
+    const target = yield* resolveRepository({ host: remoteHost.hostname, path });
+    return { target, remote };
+  });
+
   const requestText = Effect.fn("AzureDevOpsServerApi.request")(function* (
     input: AzureDevOpsServerRequest,
   ) {
@@ -325,15 +390,17 @@ export const make = Effect.gen(function* () {
       Effect.timeout(TIMEOUT),
       Effect.mapError((cause) => fail({ status: null, ...transportFailure(cause), cause })),
     );
-    // Redirects stay within the collection: the token must not reach another origin.
+    // Redirects stay within the collection: the token must not reach another origin or app.
+    const collectionPath = new URL(input.server).pathname.toLowerCase().replace(/\/+$/u, "");
     let url = base.href;
     let response = yield* send(url);
     for (let hop = 0; hop < MAX_REDIRECTS && REDIRECTS.has(response.status); hop++) {
       const target = response.location === undefined ? null : URL.parse(response.location, url);
+      const targetPath = target?.pathname.toLowerCase() ?? "";
       if (
         target === null ||
         target.origin !== base.origin ||
-        !target.pathname.toLowerCase().startsWith(new URL(input.server).pathname.toLowerCase()) ||
+        (targetPath !== collectionPath && !targetPath.startsWith(`${collectionPath}/`)) ||
         (method !== "GET" && response.status !== 307 && response.status !== 308)
       ) {
         break;
@@ -392,6 +459,7 @@ export const make = Effect.gen(function* () {
   return AzureDevOpsServerApi.of({
     servers,
     resolveRepository,
+    resolveCheckout,
     requestText,
     request,
     requestList,

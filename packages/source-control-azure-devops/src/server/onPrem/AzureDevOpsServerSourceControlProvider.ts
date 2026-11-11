@@ -14,15 +14,11 @@ import {
 } from "@t3tools/source-control-core/server/pullRequestUtils";
 import * as SourceControlHost from "@t3tools/source-control-core/server/SourceControlHost";
 import * as SourceControlProvider from "@t3tools/source-control-core/server/SourceControlProvider";
-import {
-  parseGitRemoteHost,
-  recognizeRemoteWith,
-} from "@t3tools/source-control-core/shared/definition";
+import { parseGitRemoteHost } from "@t3tools/source-control-core/shared/definition";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
-import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import * as ServerDefinition from "../../shared/serverDefinition.ts";
@@ -37,7 +33,8 @@ import {
   decodePullRequest,
   decodePullRequests,
   decodeRepository,
-  latestTime,
+  decodeThreads,
+  pullRequestUpdatedAt,
   type ServerPullRequest,
 } from "./azureDevOpsServerJson.ts";
 
@@ -56,8 +53,7 @@ const STATUS_FILTER: Record<ChangeRequestState | "all", string> = {
 const repositoryPath = (target: Pick<ServerRepositoryRef, "project" | "repository">) =>
   `${encodePath(target.project)}/_apis/git/repositories/${encodePath(target.repository)}`;
 
-function toChangeRequest(pullRequest: ServerPullRequest): ChangeRequest {
-  const updatedAt = latestTime(pullRequest.createdAt, pullRequest.closedAt);
+function toChangeRequest(pullRequest: ServerPullRequest, updatedAt: string): ChangeRequest {
   return {
     provider: KIND,
     number: pullRequest.number,
@@ -70,7 +66,7 @@ function toChangeRequest(pullRequest: ServerPullRequest): ChangeRequest {
     ...(pullRequest.isDraft ? { isDraft: true } : {}),
     closedAt: pullRequest.state === "closed" ? pullRequest.closedAt : null,
     mergedAt: pullRequest.state === "merged" ? pullRequest.closedAt : null,
-    updatedAt: updatedAt === null ? Option.none() : DateTime.make(updatedAt),
+    updatedAt: DateTime.make(updatedAt),
     isCrossRepository: pullRequest.isCrossRepository,
   };
 }
@@ -121,45 +117,52 @@ export const make = Effect.gen(function* () {
         cause,
       });
 
-  const remoteOf = Effect.fn("AzureDevOpsServerSourceControlProvider.remoteOf")(function* (input: {
+  const targetOf = (input: {
     readonly cwd: string;
     readonly context?: SourceControlProvider.SourceControlProviderContext;
-  }) {
-    if (input.context?.provider.kind === KIND) {
-      return { name: input.context.remoteName, url: input.context.remoteUrl };
-    }
-    const remotes = yield* yield* git.remotes(input.cwd);
-    const remote = remotes.remotes.find(
-      (candidate) => recognizeRemoteWith(ServerDefinition.definition, candidate.url) !== null,
-    );
-    if (remote !== undefined) return { name: remote.name, url: remote.url };
-    return yield* new AzureDevOpsServerApiError({
-      server: input.cwd,
-      operation: "resolveRepository",
-      status: null,
-      reason: "not-configured",
-      detail: "No remote of this checkout is on an Azure DevOps Server.",
-    });
-  });
+  }) => api.resolveCheckout(input);
 
-  const targetOf = Effect.fn("AzureDevOpsServerSourceControlProvider.targetOf")(function* (input: {
+  // Dated as the pull request reads date it, or a branch's status would lag behind them.
+  const withActivity = (
+    target: ServerRepositoryRef,
+    pullRequests: ReadonlyArray<ServerPullRequest>,
+  ) =>
+    Effect.forEach(
+      pullRequests,
+      (pullRequest) =>
+        api
+          .requestList({
+            server: target.server,
+            operation: "listChangeRequests",
+            path: `${repositoryPath(target)}/pullRequests/${pullRequest.number}/threads`,
+          })
+          .pipe(
+            Effect.map((rows) => decodeThreads(rows, pullRequest.url).lastUpdatedAt),
+            Effect.orElseSucceed(() => null),
+            Effect.map((threadsAt) =>
+              toChangeRequest(pullRequest, pullRequestUpdatedAt(pullRequest, threadsAt)),
+            ),
+          ),
+      { concurrency: 4 },
+    );
+
+  /** `collection/project/_git/repo`, `project/repo` or `repo` in the checkout's collection. */
+  const repositoryInCheckout = Effect.fn(
+    "AzureDevOpsServerSourceControlProvider.repositoryInCheckout",
+  )(function* (input: {
     readonly cwd: string;
     readonly context?: SourceControlProvider.SourceControlProviderContext;
+    readonly repository: string;
   }) {
-    const remote = yield* remoteOf(input);
-    const remoteHost = parseGitRemoteHost(remote.url);
-    const path = SourceControlProvider.repositoryPathFromRemoteUrl(remote.url);
-    if (remoteHost === null || path === null) {
-      return yield* new AzureDevOpsServerApiError({
-        server: remote.url,
-        operation: "resolveRepository",
-        status: null,
-        reason: "not-configured",
-        detail: "The remote names no Azure DevOps Server repository.",
-      });
+    const { target, remote } = yield* targetOf(input);
+    if (input.repository.toLowerCase().includes("_git")) {
+      const hostname = parseGitRemoteHost(remote.url)?.hostname ?? "";
+      return yield* api.resolveRepository({ host: hostname, path: input.repository });
     }
-    const target = yield* api.resolveRepository({ host: remoteHost.hostname, path });
-    return { target, remote };
+    const [first = "", second] = input.repository.split("/").filter((part) => part.length > 0);
+    return second === undefined
+      ? { server: target.server, project: first, repository: first }
+      : { server: target.server, project: first, repository: second };
   });
 
   const readPullRequest = Effect.fn("AzureDevOpsServerSourceControlProvider.readPullRequest")(
@@ -209,7 +212,7 @@ export const make = Effect.gen(function* () {
             $top: input.limit ?? 20,
           },
         });
-        return decodePullRequests(target.server, rows).map(toChangeRequest);
+        return yield* withActivity(target, decodePullRequests(target.server, rows));
       },
       (effect, input) =>
         effect.pipe(
@@ -222,7 +225,9 @@ export const make = Effect.gen(function* () {
     getChangeRequest: Effect.fn("AzureDevOpsServerSourceControlProvider.getChangeRequest")(
       function* (input) {
         const { target } = yield* targetOf(input);
-        return toChangeRequest(yield* readPullRequest(target, input.reference, "getChangeRequest"));
+        const pullRequest = yield* readPullRequest(target, input.reference, "getChangeRequest");
+        const [changeRequest] = yield* withActivity(target, [pullRequest]);
+        return changeRequest!;
       },
       (effect, input) =>
         effect.pipe(
@@ -263,7 +268,7 @@ export const make = Effect.gen(function* () {
       function* (input) {
         const target =
           input.host === undefined
-            ? (yield* targetOf(input)).target
+            ? yield* repositoryInCheckout(input)
             : yield* api.resolveRepository({ host: input.host, path: input.repository });
         const repository = decodeRepository(
           yield* api.request({

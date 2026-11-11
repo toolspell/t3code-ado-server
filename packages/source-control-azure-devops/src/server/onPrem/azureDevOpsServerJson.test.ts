@@ -64,6 +64,17 @@ describe("decodePullRequest", () => {
       location: { projectId: "a8beb27b", project: "Demo Project", repository: "Demo Repo" },
     });
   });
+
+  it.each([
+    ["conflicts", "conflicting"],
+    ["rejectedByPolicy", "unknown"],
+    ["failure", "unknown"],
+    ["succeeded", "mergeable"],
+  ])("reads merge status %s as %s", (mergeStatus, mergeability) => {
+    expect(decodePullRequest(COLLECTION, rawPullRequest({ mergeStatus }))?.mergeability).toBe(
+      mergeability,
+    );
+  });
 });
 
 describe("pullRequestUpdatedAt", () => {

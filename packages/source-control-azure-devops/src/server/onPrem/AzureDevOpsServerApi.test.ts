@@ -83,10 +83,12 @@ it.effect("signs requests with the PAT as a Basic password and pins the API vers
   }).pipe(Effect.provide(layer));
 });
 
-it.effect("does not follow a redirect off the collection, so the PAT stays with it", () => {
+it.effect.each([
+  "https://elsewhere.example/_apis",
+  "https://ado2022.fritz.box/defaultcollection-other/_apis",
+])("does not follow a redirect off the collection to %s, so the PAT stays with it", (location) => {
   const { requests, layer } = makeLayer(
-    () =>
-      new Response(null, { status: 302, headers: { location: "https://elsewhere.example/_apis" } }),
+    () => new Response(null, { status: 302, headers: { location } }),
   );
   return Effect.gen(function* () {
     const api = yield* AzureDevOpsServerApi.AzureDevOpsServerApi;
