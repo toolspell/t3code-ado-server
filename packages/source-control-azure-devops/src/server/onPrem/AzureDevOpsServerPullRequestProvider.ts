@@ -638,6 +638,16 @@ export const make = Effect.gen(function* () {
   /** Deleting a ref names the commit it points at, so a branch pushed to since stays. */
   const deleteSourceBranch = Effect.fn("AzureDevOpsServerPullRequestProvider.deleteSourceBranch")(
     function* (target: ServerRepositoryRef, pullRequest: ServerPullRequest, operation: string) {
+      // The branch lives in the fork; one of the same name here is someone else's.
+      if (pullRequest.isCrossRepository) {
+        return yield* new AzureDevOpsServerApi.AzureDevOpsServerApiError({
+          server: target.server,
+          operation,
+          status: null,
+          reason: "forbidden",
+          detail: "This pull request comes from a fork. Delete its branch in the fork.",
+        });
+      }
       const refs = yield* api.requestList({
         server: target.server,
         operation,

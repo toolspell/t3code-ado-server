@@ -251,21 +251,27 @@ it.effect("turns auto-complete off by clearing who set it", () => {
 
 it.effect("deletes the source branch at the commit it points at, and reports a refusal", () => {
   const refs = { value: [{ name: "refs/heads/feature/26", objectId: "def456" }] };
-  const run = (refused: boolean) => {
+  const run = (refused: boolean, overrides: Record<string, unknown> = {}) => {
     const { layer, calls } = makeLayer({
       pullRequests: [],
       answer: (input) =>
-        input.path.endsWith("/refs")
-          ? input.method === "POST"
-            ? {
-                value: [
-                  refused
-                    ? { success: false, updateStatus: "rejectedByPolicy", customMessage: "Locked" }
-                    : { success: true },
-                ],
-              }
-            : refs
-          : undefined,
+        input.path === `${BASE}/pullRequests/26` && input.method === undefined
+          ? pullRequest(26, overrides)
+          : input.path.endsWith("/refs")
+            ? input.method === "POST"
+              ? {
+                  value: [
+                    refused
+                      ? {
+                          success: false,
+                          updateStatus: "rejectedByPolicy",
+                          customMessage: "Locked",
+                        }
+                      : { success: true },
+                  ],
+                }
+              : refs
+            : undefined,
     });
     return Effect.gen(function* () {
       const provider = yield* AzureDevOpsServerPullRequestProvider.make;
@@ -290,6 +296,13 @@ it.effect("deletes the source branch at the commit it points at, and reports a r
       kept.result._tag === "Failure" ? kept.result.failure.reason : null,
       "forbidden",
     );
+    // A fork's branch is not this repository's to delete, whatever shares its name here.
+    const fork = yield* run(false, { forkSource: { repository: { id: "fork" } } });
+    assert.strictEqual(
+      fork.result._tag === "Failure" ? fork.result.failure.reason : null,
+      "forbidden",
+    );
+    assert.deepStrictEqual(writes(fork.calls), []);
   });
 });
 
