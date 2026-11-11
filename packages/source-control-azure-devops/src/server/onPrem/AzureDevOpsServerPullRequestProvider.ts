@@ -54,6 +54,7 @@ import {
   decodeAccountName,
   decodeChecks,
   decodeCommits,
+  decodeCommentContent,
   decodeConnectionData,
   decodeIdentityIds,
   decodeIdentityNames,
@@ -65,10 +66,12 @@ import {
   decodeRootCommentId,
   decodeThreads,
   mentionedIdentityIds,
+  mentionIdsIn,
   pendingReviewerLogins,
   pullRequestUpdatedAt,
   reviewDecisionOf,
   type ServerPullRequest,
+  restoreMentions,
   type ServerThreads,
   withMentionNames,
 } from "./azureDevOpsServerJson.ts";
@@ -777,16 +780,15 @@ export const make = Effect.gen(function* () {
   // Display names change rarely; a mention keeps its id either way.
   const identityNames = new Map<string, string>();
 
-  const withNamedMentions = Effect.fn("AzureDevOpsServerPullRequestProvider.withNamedMentions")(
-    function* (server: string, threads: ServerThreads) {
-      const unknown = mentionedIdentityIds(threads).filter(
-        (id) => !identityNames.has(`${server}\0${id}`),
-      );
+  /** Display names of `ids` on `server`, from the cache or one batched identity read. */
+  const identityNamesOf = Effect.fn("AzureDevOpsServerPullRequestProvider.identityNamesOf")(
+    function* (server: string, ids: ReadonlyArray<string>) {
+      const unknown = ids.filter((id) => !identityNames.has(`${server}\0${id}`));
       if (unknown.length > 0) {
         const named = yield* api
           .requestList({
             server,
-            operation: "getChangeRequestActivity",
+            operation: "identityNames",
             path: "_apis/identities",
             query: { identityIds: unknown.join(","), queryMembership: "None" },
           })
@@ -797,13 +799,21 @@ export const make = Effect.gen(function* () {
         if (identityNames.size > IDENTITY_NAME_CAPACITY) identityNames.clear();
         for (const [id, name] of named) identityNames.set(`${server}\0${id}`, name);
       }
-      const names = new Map(
-        mentionedIdentityIds(threads).flatMap((id) => {
+      return new Map(
+        ids.flatMap((id) => {
           const name = identityNames.get(`${server}\0${id}`);
           return name === undefined ? [] : [[id, name] as const];
         }),
       );
-      return withMentionNames(threads, names);
+    },
+  );
+
+  const withNamedMentions = Effect.fn("AzureDevOpsServerPullRequestProvider.withNamedMentions")(
+    function* (server: string, threads: ServerThreads) {
+      return withMentionNames(
+        threads,
+        yield* identityNamesOf(server, mentionedIdentityIds(threads)),
+      );
     },
   );
 
@@ -1301,12 +1311,18 @@ export const make = Effect.gen(function* () {
       function* (input) {
         const target = yield* locate(input);
         const [threadId, commentId] = input.commentId.split(":");
+        const path = `${pullRequestPath(target, input.number)}/threads/${AzureDevOpsServerApi.encodePath(threadId ?? "")}/comments/${AzureDevOpsServerApi.encodePath(commentId ?? "")}`;
+        // The editor got mentions as names; the saved comment must keep Azure's own markup.
+        const original = decodeCommentContent(
+          yield* api.request({ server: target.server, operation: "updateComment", path }),
+        );
+        const names = yield* identityNamesOf(target.server, mentionIdsIn(original));
         yield* api.request({
           server: target.server,
           operation: "updateComment",
           method: "PATCH",
-          path: `${pullRequestPath(target, input.number)}/threads/${AzureDevOpsServerApi.encodePath(threadId ?? "")}/comments/${AzureDevOpsServerApi.encodePath(commentId ?? "")}`,
-          body: { content: input.body },
+          path,
+          body: { content: restoreMentions(input.body, names) },
         });
       },
       Effect.mapError(fail("updateComment")),

@@ -457,6 +457,8 @@ it.effect("posts a review's comments, then votes for the viewer", () => {
   }).pipe(Effect.provide(layer));
 });
 
+const HARRY = "b5ffda4b-fec4-4076-8beb-cb83409a5469";
+
 it.effect("replies under a thread's first comment and resolves it", () => {
   const { layer, calls } = makeLayer({
     pullRequests: [],
@@ -469,7 +471,12 @@ it.effect("replies under a thread's first comment and resolves it", () => {
               { id: 5, parentCommentId: 4 },
             ],
           }
-        : undefined,
+        : input.path === `${BASE}/pullRequests/26/threads/7/comments/5` &&
+            input.method === undefined
+          ? { id: 5, content: `Done, @<${HARRY}>.` }
+          : input.path === "_apis/identities"
+            ? { value: [{ id: HARRY, providerDisplayName: "Harry Walker" }] }
+            : undefined,
   });
   return Effect.gen(function* () {
     const provider = yield* AzureDevOpsServerPullRequestProvider.make;
@@ -480,7 +487,8 @@ it.effect("replies under a thread's first comment and resolves it", () => {
       number: 26,
       commentId: "7:5",
       kind: "review-comment",
-      body: "Done, see 3f2a.",
+      // The editor showed the mention as a name; the save must keep Azure's markup.
+      body: "Done, see 3f2a, @Harry Walker.",
     });
     assert.deepStrictEqual(
       writes(calls).map((call) => [call.method, call.path, call.body]),
@@ -491,7 +499,11 @@ it.effect("replies under a thread's first comment and resolves it", () => {
           { parentCommentId: 4, content: "Done.", commentType: 1 },
         ],
         ["PATCH", `${BASE}/pullRequests/26/threads/7`, { status: "fixed" }],
-        ["PATCH", `${BASE}/pullRequests/26/threads/7/comments/5`, { content: "Done, see 3f2a." }],
+        [
+          "PATCH",
+          `${BASE}/pullRequests/26/threads/7/comments/5`,
+          { content: `Done, see 3f2a, @<${HARRY}>.` },
+        ],
       ],
     );
   }).pipe(Effect.provide(layer));

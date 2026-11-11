@@ -389,12 +389,32 @@ function toRepositoryPath(value: string | null | undefined): string | null {
 /** Azure stores a mention as `@<identity id>`; the names fill in once read. */
 const MENTION = /@<([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})>/giu;
 
+export function mentionIdsIn(text: string): ReadonlyArray<string> {
+  return [...new Set([...text.matchAll(MENTION)].map((match) => match[1]!.toLowerCase()))];
+}
+
 export function mentionedIdentityIds(threads: ServerThreads): ReadonlyArray<string> {
-  const ids = new Set<string>();
-  for (const comment of threads.comments) {
-    for (const match of comment.body.matchAll(MENTION)) ids.add(match[1]!.toLowerCase());
+  return mentionIdsIn(threads.comments.map((comment) => comment.body).join("\n"));
+}
+
+/**
+ * `@Display Name` back to `@<id>` for the identities a comment mentioned before its edit, longest
+ * name first so one name inside another cannot take its place.
+ */
+export function restoreMentions(text: string, names: ReadonlyMap<string, string>): string {
+  let restored = text;
+  for (const [id, name] of [...names].toSorted(
+    ([, left], [, right]) => right.length - left.length,
+  )) {
+    restored = restored.replaceAll(`@${name}`, `@<${id}>`);
   }
-  return [...ids];
+  return restored;
+}
+
+const RawCommentContent = Schema.Struct({ content: OptionalString });
+
+export function decodeCommentContent(body: unknown): string {
+  return decodeEach(RawCommentContent, [body])[0]?.content ?? "";
 }
 
 /** `@<id>` as `@Display Name` for the identities `names` knows, the rest as written. */

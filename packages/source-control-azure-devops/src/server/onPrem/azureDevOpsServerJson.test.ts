@@ -10,6 +10,7 @@ import {
   decodeThreads,
   mentionedIdentityIds,
   pullRequestUpdatedAt,
+  restoreMentions,
   reviewDecisionOf,
   withMentionNames,
 } from "./azureDevOpsServerJson.ts";
@@ -338,6 +339,17 @@ describe("mentions, edit rights and replies", () => {
       ["Sure.", true],
     ]);
     expect(named.overviewThreads[0]?.comments[0]?.body).toBe("Can you look, @Harry Walker?");
+  });
+
+  // The editor gets names, so saving an edit must not turn a mention into plain text.
+  it("restores the mentions a comment had before its edit, longest name first", () => {
+    const names = new Map([
+      ["max-id", "Max"],
+      ["maxb-id", "Max Beckenbach"],
+    ]);
+    expect(restoreMentions("Ping @Max Beckenbach and @Max, cc @Someone.", names)).toBe(
+      "Ping @<maxb-id> and @<max-id>, cc @Someone.",
+    );
   });
 
   it("replies to the comment that started a thread", () => {
