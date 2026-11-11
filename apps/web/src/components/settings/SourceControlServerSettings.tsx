@@ -14,6 +14,7 @@ import {
 } from "@t3tools/client-runtime/source-control-clients";
 import * as Cause from "effect/Cause";
 import { ExternalLinkIcon, PlusIcon } from "lucide-react";
+import { useAtomValue } from "@effect/atom-react";
 import { useId, useState } from "react";
 
 import { useEnvironmentSettings } from "../../hooks/useSettings";
@@ -41,20 +42,28 @@ import {
   type SavedServer,
 } from "./SourceControlServerSettings.logic";
 
+/** Every check but `idle` names the draft it tested, so an answer for an older draft is ignored. */
 type CheckState =
   | { readonly kind: "idle" }
-  | { readonly kind: "checking" }
-  | { readonly kind: "ok"; readonly result: SourceControlCheckServerResult }
+  | { readonly kind: "checking"; readonly draft: string }
+  | { readonly kind: "ok"; readonly draft: string; readonly result: SourceControlCheckServerResult }
   | {
       readonly kind: "failed";
+      readonly draft: string;
       readonly detail: string;
       readonly suggestions: ReadonlyArray<string>;
     };
 
-function checkFailure(cause: Cause.Cause<unknown>): Extract<CheckState, { kind: "failed" }> {
+const IDLE: CheckState = { kind: "idle" };
+
+function checkFailure(
+  draft: string,
+  cause: Cause.Cause<unknown>,
+): Extract<CheckState, { kind: "failed" }> {
   const error = Cause.squash(cause) as Partial<SourceControlCheckServerError> | undefined;
   return {
     kind: "failed",
+    draft,
     detail:
       typeof error?.detail === "string" ? error.detail : "Could not check the server right now.",
     suggestions: error?.suggestions ?? [],
@@ -188,7 +197,9 @@ function ServerEditor({
     server !== null && isSecretReference(server.token) ? server.token : "",
   );
   const [validToken, setValidToken] = useState(true);
-  const [check, setCheck] = useState<CheckState>({ kind: "idle" });
+  const [latestCheck, setCheck] = useState<CheckState>(IDLE);
+  const canCheck = useAtomValue(sourceControlEnvironment.checkServer.permissionAtom(environmentId));
+  const canSave = useAtomValue(serverEnvironment.updateSettings.permissionAtom(environmentId));
   const [busy, setBusy] = useState(false);
   const normalizedUrl = normalizeSourceControlServerUrl(url);
   const tokenEntered = typeof token === "string" ? token.trim() : token;
@@ -204,9 +215,13 @@ function ServerEditor({
         saved,
       });
 
+  const draft = JSON.stringify([normalizedUrl, changedToken ? tokenEntered : null]);
+  const check = latestCheck.kind !== "idle" && latestCheck.draft === draft ? latestCheck : IDLE;
+
   const runCheck = async () => {
     if (normalizedUrl === null) return;
-    setCheck({ kind: "checking" });
+    const tested = draft;
+    setCheck({ kind: "checking", draft: tested });
     const result = await checkServer({
       environmentId,
       input: {
@@ -216,7 +231,9 @@ function ServerEditor({
       },
     });
     setCheck(
-      result._tag === "Success" ? { kind: "ok", result: result.value } : checkFailure(result.cause),
+      result._tag === "Success"
+        ? { kind: "ok", draft: tested, result: result.value }
+        : checkFailure(tested, result.cause),
     );
   };
 
@@ -270,7 +287,7 @@ function ServerEditor({
                 disabled={busy || server !== null}
                 onChange={(event) => {
                   setUrl(event.target.value);
-                  setCheck({ kind: "idle" });
+                  setCheck(IDLE);
                 }}
               />
               <p className="text-xs text-muted-foreground">{servers.urlHint}</p>
@@ -295,11 +312,11 @@ function ServerEditor({
                 onValidityChange={setValidToken}
                 onChange={(event) => {
                   setToken(event.target.value);
-                  setCheck({ kind: "idle" });
+                  setCheck(IDLE);
                 }}
                 onSecretChange={(secret) => {
                   setToken(secret ?? "");
-                  setCheck({ kind: "idle" });
+                  setCheck(IDLE);
                 }}
               />
             </div>
@@ -336,7 +353,11 @@ function ServerEditor({
                 size="xs"
                 variant="outline"
                 disabled={
-                  busy || normalizedUrl === null || !validToken || check.kind === "checking"
+                  busy ||
+                  !canCheck ||
+                  normalizedUrl === null ||
+                  !validToken ||
+                  check.kind === "checking"
                 }
                 onClick={() => void runCheck()}
               >
@@ -359,7 +380,7 @@ function ServerEditor({
                     key={suggestion}
                     onClick={() => {
                       setUrl(suggestion);
-                      setCheck({ kind: "idle" });
+                      setCheck(IDLE);
                     }}
                   >
                     {suggestion}
@@ -377,7 +398,7 @@ function ServerEditor({
                 <Button
                   type="button"
                   variant="destructive-outline"
-                  disabled={busy}
+                  disabled={busy || !canSave}
                   onClick={() => void save(server.url, "")}
                 >
                   Remove server
@@ -387,7 +408,7 @@ function ServerEditor({
             <Button type="button" variant="ghost" disabled={busy} onClick={onClose}>
               Cancel
             </Button>
-            <Button type="submit" disabled={busy || problem !== null}>
+            <Button type="submit" disabled={busy || !canSave || problem !== null}>
               {busy ? <Spinner size="xs" /> : null}
               {server === null ? "Add server" : "Save token"}
             </Button>
