@@ -811,7 +811,13 @@ export const make = Effect.gen(function* () {
   /** Display names of `ids` on `server`, from the cache or one batched identity read. */
   const identityNamesOf = Effect.fn("AzureDevOpsServerPullRequestProvider.identityNamesOf")(
     function* (server: string, ids: ReadonlyArray<string>) {
-      const unknown = ids.filter((id) => !identityNames.has(`${server}\0${id}`));
+      const names = new Map<string, string>();
+      const unknown: string[] = [];
+      for (const id of ids) {
+        const name = identityNames.get(`${server}\0${id}`);
+        if (name === undefined) unknown.push(id);
+        else names.set(id, name);
+      }
       if (unknown.length > 0) {
         const named = yield* api
           .requestList({
@@ -825,14 +831,12 @@ export const make = Effect.gen(function* () {
             Effect.orElseSucceed((): ReadonlyMap<string, string> => new Map()),
           );
         if (identityNames.size > IDENTITY_NAME_CAPACITY) identityNames.clear();
-        for (const [id, name] of named) identityNames.set(`${server}\0${id}`, name);
+        for (const [id, name] of named) {
+          identityNames.set(`${server}\0${id}`, name);
+          names.set(id, name);
+        }
       }
-      return new Map(
-        ids.flatMap((id) => {
-          const name = identityNames.get(`${server}\0${id}`);
-          return name === undefined ? [] : [[id, name] as const];
-        }),
-      );
+      return names;
     },
   );
 

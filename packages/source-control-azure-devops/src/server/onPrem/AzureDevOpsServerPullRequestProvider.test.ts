@@ -524,6 +524,49 @@ it.effect("replies under a thread's first comment and resolves it", () => {
   }).pipe(Effect.provide(layer));
 });
 
+it.effect("keeps the mention names it knew when its name cache fills up", () => {
+  const SALLY = "c0ffee00-0000-4000-8000-000000000001";
+  const filler = Array.from(
+    { length: 1024 },
+    (_, index) => `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+  );
+  let content = [HARRY, ...filler].map((id) => `@<${id}>`).join(" ");
+  const { layer, calls } = makeLayer({
+    pullRequests: [],
+    answer: (input) =>
+      input.path === `${BASE}/pullRequests/26/threads/7/comments/5` && input.method === undefined
+        ? { id: 5, content }
+        : input.path === "_apis/identities"
+          ? {
+              value: String(input.query?.identityIds)
+                .split(",")
+                .map((id) => ({
+                  id,
+                  providerDisplayName:
+                    id === HARRY ? "Harry Walker" : id === SALLY ? "Sally Ride" : `User ${id}`,
+                })),
+            }
+          : undefined,
+  });
+  return Effect.gen(function* () {
+    const provider = yield* AzureDevOpsServerPullRequestProvider.make;
+    const edit = (body: string) =>
+      provider.updateComment!({
+        ...ref,
+        number: 26,
+        commentId: "7:5",
+        kind: "review-comment",
+        body,
+      });
+    yield* edit("Cleared.");
+    content = `@<${HARRY}> and @<${SALLY}>`;
+    yield* edit("@Harry Walker and @Sally Ride");
+    assert.deepStrictEqual(writes(calls).at(-1)?.body, {
+      content: `@<${HARRY}> and @<${SALLY}>`,
+    });
+  }).pipe(Effect.provide(layer));
+});
+
 it.effect("lets a throttled check read through so the caller backs off", () => {
   const { layer } = makeLayer({
     pullRequests: [],
