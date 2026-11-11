@@ -15,6 +15,7 @@ import {
   type PullRequestProviderFailure,
 } from "@t3tools/source-control-core/server/PullRequestProvider";
 import { removeAgentCredits } from "@t3tools/source-control-core/server/mergeMessage";
+import { normalizeRefName } from "@t3tools/source-control-core/server/pullRequestUtils";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
@@ -56,6 +57,7 @@ import {
   decodePullRequest,
   decodeRefObjectId,
   decodeRefUpdateFailure,
+  decodeRepository,
   decodeThreads,
   pendingReviewerLogins,
   pullRequestUpdatedAt,
@@ -635,27 +637,48 @@ export const make = Effect.gen(function* () {
       }),
     );
 
-  /** Deleting a ref names the commit it points at, so a branch pushed to since stays. */
+  /** Deletes only the commit the pull request ended at, so later pushes and shared branches stay. */
   const deleteSourceBranch = Effect.fn("AzureDevOpsServerPullRequestProvider.deleteSourceBranch")(
     function* (target: ServerRepositoryRef, pullRequest: ServerPullRequest, operation: string) {
-      // The branch lives in the fork; one of the same name here is someone else's.
-      if (pullRequest.isCrossRepository) {
-        return yield* new AzureDevOpsServerApi.AzureDevOpsServerApiError({
+      const refuse = (detail: string) =>
+        new AzureDevOpsServerApi.AzureDevOpsServerApiError({
           server: target.server,
           operation,
           status: null,
           reason: "forbidden",
-          detail: "This pull request comes from a fork. Delete its branch in the fork.",
+          detail,
         });
+      const branch = pullRequest.headBranch;
+      // The branch lives in the fork; one of the same name here is someone else's.
+      if (pullRequest.isCrossRepository) {
+        return yield* refuse("This pull request comes from a fork. Delete its branch in the fork.");
+      }
+      if (pullRequest.state === "open") {
+        return yield* refuse(
+          `Complete or abandon pull request !${pullRequest.number} before deleting its source branch.`,
+        );
+      }
+      if (pullRequest.headSha === null) {
+        return yield* refuse(`The server did not report where ${branch} ended.`);
+      }
+      const repository = decodeRepository(
+        yield* api.request({ server: target.server, operation, path: repositoryPath(target) }),
+      );
+      const defaultBranch = normalizeRefName(repository?.defaultBranch ?? "");
+      if (branch === pullRequest.baseBranch || branch === defaultBranch) {
+        return yield* refuse(`${branch} is a default or target branch and was not deleted.`);
       }
       const refs = yield* api.requestList({
         server: target.server,
         operation,
         path: `${repositoryPath(target)}/refs`,
-        query: { filter: `heads/${pullRequest.headBranch}` },
+        query: { filter: `heads/${branch}` },
       });
-      const objectId = decodeRefObjectId(refs, `refs/heads/${pullRequest.headBranch}`);
+      const objectId = decodeRefObjectId(refs, `refs/heads/${branch}`);
       if (objectId === null) return;
+      if (objectId.toLowerCase() !== pullRequest.headSha.toLowerCase()) {
+        return yield* refuse(`${branch} has new commits and was not deleted.`);
+      }
       const results = yield* api.request({
         server: target.server,
         operation,
@@ -663,7 +686,7 @@ export const make = Effect.gen(function* () {
         path: `${repositoryPath(target)}/refs`,
         body: [
           {
-            name: `refs/heads/${pullRequest.headBranch}`,
+            name: `refs/heads/${branch}`,
             oldObjectId: objectId,
             newObjectId: "0000000000000000000000000000000000000000",
           },
@@ -671,13 +694,7 @@ export const make = Effect.gen(function* () {
       });
       const failure = decodeRefUpdateFailure(results);
       if (failure !== null) {
-        return yield* new AzureDevOpsServerApi.AzureDevOpsServerApiError({
-          server: target.server,
-          operation,
-          status: null,
-          reason: "forbidden",
-          detail: `The server kept ${pullRequest.headBranch}: ${failure}.`,
-        });
+        return yield* refuse(`The server kept ${branch}: ${failure}.`);
       }
     },
   );

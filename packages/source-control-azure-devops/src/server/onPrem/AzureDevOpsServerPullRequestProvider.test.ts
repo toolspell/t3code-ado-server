@@ -249,60 +249,82 @@ it.effect("turns auto-complete off by clearing who set it", () => {
   }).pipe(Effect.provide(layer));
 });
 
-it.effect("deletes the source branch at the commit it points at, and reports a refusal", () => {
+it.effect("deletes a finished pull request's source branch only where it ended", () => {
   const refs = { value: [{ name: "refs/heads/feature/26", objectId: "def456" }] };
-  const run = (refused: boolean, overrides: Record<string, unknown> = {}) => {
+  const run = (
+    refused: boolean,
+    overrides: Record<string, unknown> = {},
+    defaultBranch = "main",
+  ) => {
     const { layer, calls } = makeLayer({
       pullRequests: [],
       answer: (input) =>
-        input.path === `${BASE}/pullRequests/26` && input.method === undefined
-          ? pullRequest(26, overrides)
-          : input.path.endsWith("/refs")
-            ? input.method === "POST"
+        input.method === "POST" && input.path.endsWith("/refs")
+          ? {
+              value: [
+                refused
+                  ? { success: false, updateStatus: "rejectedByPolicy", customMessage: "Locked" }
+                  : { success: true },
+              ],
+            }
+          : input.path === `${BASE}/pullRequests/26`
+            ? pullRequest(26, {
+                status: "completed",
+                lastMergeSourceCommit: { commitId: "DEF456" },
+                ...overrides,
+              })
+            : input.path === BASE
               ? {
-                  value: [
-                    refused
-                      ? {
-                          success: false,
-                          updateStatus: "rejectedByPolicy",
-                          customMessage: "Locked",
-                        }
-                      : { success: true },
-                  ],
+                  id: "repo",
+                  name: "DemoProjectTwo",
+                  project: { id: "proj", name: "DemoProjectTwo" },
+                  defaultBranch: `refs/heads/${defaultBranch}`,
                 }
-              : refs
-            : undefined,
+              : input.path.endsWith("/refs")
+                ? refs
+                : undefined,
     });
     return Effect.gen(function* () {
       const provider = yield* AzureDevOpsServerPullRequestProvider.make;
       const result = yield* provider
         .runAction({ ...ref, number: 26, action: "delete-branch" })
         .pipe(Effect.result);
-      return { result, calls };
+      return {
+        reason: result._tag === "Failure" ? result.failure.reason : null,
+        writes: writes(calls).map((call) => call.body),
+      };
     }).pipe(Effect.provide(layer));
   };
   return Effect.gen(function* () {
-    const deleted = yield* run(false);
-    assert.strictEqual(deleted.result._tag, "Success");
-    assert.deepStrictEqual(writes(deleted.calls)[0]?.body, [
-      {
-        name: "refs/heads/feature/26",
-        oldObjectId: "def456",
-        newObjectId: "0000000000000000000000000000000000000000",
-      },
-    ]);
-    const kept = yield* run(true);
-    assert.strictEqual(
-      kept.result._tag === "Failure" ? kept.result.failure.reason : null,
-      "forbidden",
-    );
-    // A fork's branch is not this repository's to delete, whatever shares its name here.
-    const fork = yield* run(false, { forkSource: { repository: { id: "fork" } } });
-    assert.strictEqual(
-      fork.result._tag === "Failure" ? fork.result.failure.reason : null,
-      "forbidden",
-    );
-    assert.deepStrictEqual(writes(fork.calls), []);
+    assert.deepStrictEqual(yield* run(false), {
+      reason: null,
+      writes: [
+        [
+          {
+            name: "refs/heads/feature/26",
+            oldObjectId: "def456",
+            newObjectId: "0000000000000000000000000000000000000000",
+          },
+        ],
+      ],
+    });
+    assert.strictEqual((yield* run(true)).reason, "forbidden");
+    for (const [why, overrides, defaultBranch] of [
+      // A fork's branch is not this repository's to delete, whatever shares its name here.
+      ["fork", { forkSource: { repository: { id: "fork" } } }, "main"],
+      ["open", { status: "active" }, "main"],
+      ["pushed since", { lastMergeSourceCommit: { commitId: "abc123" } }, "main"],
+      ["default branch", {}, "feature/26"],
+    ] as const) {
+      assert.deepStrictEqual(
+        yield* run(false, overrides, defaultBranch),
+        {
+          reason: "forbidden",
+          writes: [],
+        },
+        why,
+      );
+    }
   });
 });
 
