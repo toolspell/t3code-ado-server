@@ -136,6 +136,9 @@ describe("sourceControlClients.parseChangeRequestUrl", () => {
         number: 123,
       });
       expect
+        .soft(sourceControlClients.findByChangeRequestUrl(linked.url)?.kind, host)
+        .toBe("azure-devops-server");
+      expect
         .soft(
           sourceControlClients.isSameChangeRequest(linked.url, `${linked.url}?view=files`),
           host,
@@ -274,6 +277,9 @@ describe("sourceControlClients.recognizeRemote", () => {
     expect(kindOfRemote("https://gitlab.github.example/o/r")).toBe("github");
     expect(kindOfRemote("https://bitbucket.gitlab.example/o/r")).toBe("gitlab");
     expect(kindOfRemote("https://bitbucket.visualstudio.com/p/_git/r")).toBe("azure-devops");
+    expect(kindOfRemote("https://gitlab.corp.example/Collection/Project/_git/Repo")).toBe(
+      "azure-devops-server",
+    );
     expect(kindOfRemote("git@git.cafe:pingdotgg/t3code.git")).toBe("gitcafe");
     expect(kindOfRemote("https://origin.cursor.com/acme/web.git")).toBe("cursor-origin");
   });
@@ -313,6 +319,10 @@ describe("sourceControlClients repository keys", () => {
     [
       "https://T3Tools.visualstudio.com/DefaultCollection/Platform/_git/T3Code",
       "t3tools.visualstudio.com/defaultcollection/platform/_git/t3code",
+    ],
+    [
+      "ssh://tfs.corp.example:22/Collection/Project/_git/Repo",
+      "tfs.corp.example/collection/project/_git/repo",
     ],
     ["git@ssh.dev.azure.com:v3/o/p", "ssh.dev.azure.com/v3/o/p"],
     ["ssh.dev.azure.com/v3/o/p/r", "ssh.dev.azure.com/v3/o/p/r"],
