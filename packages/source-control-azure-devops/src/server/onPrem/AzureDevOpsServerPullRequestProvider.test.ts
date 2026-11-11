@@ -1,4 +1,4 @@
-import { assert, it } from "@effect/vitest";
+import { assert, describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -390,6 +390,189 @@ it.effect("marks checks it could not list instead of passing on the rest", () =>
         ["Branch policies", "pending", true],
       ],
     );
+  }).pipe(Effect.provide(layer));
+});
+
+describe("threadContextOf", () => {
+  it.each([
+    [
+      "an added range",
+      { kind: "added", newLine: 5 },
+      { kind: "added", newLine: 3 },
+      { rightFileStart: { line: 3, offset: 1 }, rightFileEnd: { line: 5, offset: 100_000 } },
+    ],
+    [
+      "a deleted line on the old path",
+      { kind: "deleted", oldLine: 9 },
+      undefined,
+      { leftFileStart: { line: 9, offset: 1 }, leftFileEnd: { line: 9, offset: 100_000 } },
+    ],
+    [
+      "a range across sides, kept to its last line",
+      { kind: "context", oldLine: 4, newLine: 6, side: "right" },
+      { kind: "deleted", oldLine: 2 },
+      { rightFileStart: { line: 6, offset: 1 }, rightFileEnd: { line: 6, offset: 100_000 } },
+    ],
+  ] as const)("covers %s", (_, position, startPosition, lines) => {
+    const context = AzureDevOpsServerPullRequestProvider.threadContextOf({
+      path: "src/new.ts",
+      oldPath: "src/old.ts",
+      position,
+      ...(startPosition === undefined ? {} : { startPosition }),
+      body: "x",
+    });
+    const { filePath, ...rest } = context;
+    expect(filePath).toBe(position.kind === "deleted" ? "/src/old.ts" : "/src/new.ts");
+    expect(rest).toEqual(lines);
+  });
+});
+
+it.effect("posts a review's comments, then votes for the viewer", () => {
+  const { layer, calls } = makeLayer({
+    pullRequests: [],
+    answer: (input) =>
+      input.path === `${BASE}/pullRequests/26/iterations`
+        ? {
+            value: [1, 2].map((id) => ({
+              id,
+              sourceRefCommit: { commitId: `head${id}` },
+              commonRefCommit: { commitId: "base" },
+            })),
+          }
+        : input.path === `${BASE}/pullRequests/26/iterations/2/changes`
+          ? { changeEntries: [{ changeTrackingId: 2, item: { path: "/src/store.js" } }] }
+          : undefined,
+  });
+  return Effect.gen(function* () {
+    const provider = yield* AzureDevOpsServerPullRequestProvider.make;
+    yield* provider.submitReview({
+      ...ref,
+      number: 26,
+      verdict: "request-changes",
+      body: "Needs tests.",
+      comments: [{ path: "src/store.js", position: { kind: "added", newLine: 3 }, body: "Why?" }],
+    });
+    yield* provider.submitReview({
+      ...ref,
+      number: 26,
+      verdict: "approve",
+      body: "",
+      comments: [],
+    });
+    assert.deepStrictEqual(
+      writes(calls).map((call) => [call.method, call.path, (call.body as { vote?: number }).vote]),
+      [
+        ["POST", `${BASE}/pullRequests/26/threads`, undefined],
+        ["POST", `${BASE}/pullRequests/26/threads`, undefined],
+        ["PUT", `${BASE}/pullRequests/26/reviewers/viewer-id`, -5],
+        ["PUT", `${BASE}/pullRequests/26/reviewers/viewer-id`, 10],
+      ],
+    );
+    // A file comment names its change in the latest iteration, so it follows later pushes, and
+    // compares that iteration with the merge base, as the diff does.
+    assert.deepStrictEqual(
+      (writes(calls)[0]?.body as { pullRequestThreadContext?: unknown } | undefined)
+        ?.pullRequestThreadContext,
+      {
+        changeTrackingId: 2,
+        iterationContext: { firstComparingIteration: 2, secondComparingIteration: 2 },
+      },
+    );
+  }).pipe(Effect.provide(layer));
+});
+
+const HARRY = "b5ffda4b-fec4-4076-8beb-cb83409a5469";
+
+it.effect("replies under a thread's first comment and resolves it", () => {
+  const { layer, calls } = makeLayer({
+    pullRequests: [],
+    answer: (input) =>
+      input.path === `${BASE}/pullRequests/26/threads/7` && input.method === undefined
+        ? {
+            id: 7,
+            comments: [
+              { id: 4, parentCommentId: 0 },
+              { id: 5, parentCommentId: 4 },
+            ],
+          }
+        : input.path === `${BASE}/pullRequests/26/threads/7/comments/5` &&
+            input.method === undefined
+          ? { id: 5, content: `Done, @<${HARRY}>.` }
+          : input.path === "_apis/identities"
+            ? { value: [{ id: HARRY, providerDisplayName: "Harry Walker" }] }
+            : undefined,
+  });
+  return Effect.gen(function* () {
+    const provider = yield* AzureDevOpsServerPullRequestProvider.make;
+    yield* provider.replyToThread({ ...ref, number: 26, threadId: "7", body: "Done." });
+    yield* provider.setThreadResolution({ ...ref, number: 26, threadId: "7", resolved: true });
+    yield* provider.updateComment!({
+      ...ref,
+      number: 26,
+      commentId: "7:5",
+      kind: "review-comment",
+      // The editor showed the mention as a name; the save must keep Azure's markup.
+      body: "Done, see 3f2a, @Harry Walker.",
+    });
+    assert.deepStrictEqual(
+      writes(calls).map((call) => [call.method, call.path, call.body]),
+      [
+        [
+          "POST",
+          `${BASE}/pullRequests/26/threads/7/comments`,
+          { parentCommentId: 4, content: "Done.", commentType: 1 },
+        ],
+        ["PATCH", `${BASE}/pullRequests/26/threads/7`, { status: "fixed" }],
+        [
+          "PATCH",
+          `${BASE}/pullRequests/26/threads/7/comments/5`,
+          { content: `Done, see 3f2a, @<${HARRY}>.` },
+        ],
+      ],
+    );
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("keeps the mention names it knew when its name cache fills up", () => {
+  const SALLY = "c0ffee00-0000-4000-8000-000000000001";
+  const filler = Array.from(
+    { length: 1024 },
+    (_, index) => `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+  );
+  let content = [HARRY, ...filler].map((id) => `@<${id}>`).join(" ");
+  const { layer, calls } = makeLayer({
+    pullRequests: [],
+    answer: (input) =>
+      input.path === `${BASE}/pullRequests/26/threads/7/comments/5` && input.method === undefined
+        ? { id: 5, content }
+        : input.path === "_apis/identities"
+          ? {
+              value: String(input.query?.identityIds)
+                .split(",")
+                .map((id) => ({
+                  id,
+                  providerDisplayName:
+                    id === HARRY ? "Harry Walker" : id === SALLY ? "Sally Ride" : `User ${id}`,
+                })),
+            }
+          : undefined,
+  });
+  return Effect.gen(function* () {
+    const provider = yield* AzureDevOpsServerPullRequestProvider.make;
+    const edit = (body: string) =>
+      provider.updateComment!({
+        ...ref,
+        number: 26,
+        commentId: "7:5",
+        kind: "review-comment",
+        body,
+      });
+    yield* edit("Cleared.");
+    content = `@<${HARRY}> and @<${SALLY}>`;
+    yield* edit("@Harry Walker and @Sally Ride");
+    assert.deepStrictEqual(writes(calls).at(-1)?.body, {
+      content: `@<${HARRY}> and @<${SALLY}>`,
+    });
   }).pipe(Effect.provide(layer));
 });
 

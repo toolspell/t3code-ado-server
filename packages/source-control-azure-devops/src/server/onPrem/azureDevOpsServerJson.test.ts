@@ -2,12 +2,17 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   decodeAccountName,
+  decodeIdentityNames,
+  decodeRootCommentId,
   decodeChecks,
   decodeMergeCapabilities,
   decodePullRequest,
   decodeThreads,
+  mentionedIdentityIds,
   pullRequestUpdatedAt,
+  restoreMentions,
   reviewDecisionOf,
+  withMentionNames,
 } from "./azureDevOpsServerJson.ts";
 
 const COLLECTION = "https://ado2022.fritz.box/defaultcollection";
@@ -294,5 +299,71 @@ describe("decodeAccountName", () => {
         },
       ]),
     ).toBe("ADO2022\\hwalker");
+  });
+});
+
+describe("mentions, edit rights and replies", () => {
+  const url = `${COLLECTION}/P/_git/R/pullrequest/25`;
+  const harry = "b5ffda4b-fec4-4076-8beb-cb83409a5469";
+  const rows = [
+    {
+      id: 7,
+      comments: [
+        {
+          id: 1,
+          parentCommentId: 0,
+          content: `Can you look, @<${harry.toUpperCase()}>?`,
+          publishedDate: "2026-11-11T14:00:00Z",
+          author: { id: "max-id", uniqueName: "ADO2022\\max" },
+        },
+        {
+          id: 2,
+          parentCommentId: 1,
+          content: "Sure.",
+          publishedDate: "2026-11-11T14:01:00Z",
+          author: { id: harry, uniqueName: "ADO2022\\hwalker" },
+        },
+      ],
+    },
+  ];
+
+  it("names mentioned identities and lets the viewer edit their own comments", () => {
+    const threads = decodeThreads(rows, url, harry);
+    expect(mentionedIdentityIds(threads)).toEqual([harry]);
+    const named = withMentionNames(
+      threads,
+      decodeIdentityNames([{ id: harry.toUpperCase(), providerDisplayName: "Harry Walker" }]),
+    );
+    expect(named.comments.map((comment) => [comment.body, comment.canEdit])).toEqual([
+      ["Can you look, @Harry Walker?", false],
+      ["Sure.", true],
+    ]);
+    expect(named.overviewThreads[0]?.comments[0]?.body).toBe("Can you look, @Harry Walker?");
+  });
+
+  // The editor gets names, so saving an edit must not turn a mention into plain text.
+  it("restores the mentions a comment had before its edit, by name and in order", () => {
+    const id = (n: number) => `0000000${n}-0000-4000-8000-000000000000`;
+    const names = new Map([
+      [id(1), "Max"],
+      [id(2), "Max Beckenbach"],
+      // Two people with one name.
+      [id(3), "Alex Smith"],
+      [id(4), "Alex Smith"],
+    ]);
+    const original = `Ping @<${id(2)}> and @<${id(1)}>, also @<${id(3)}> and @<${id(4)}>.`;
+    expect(
+      restoreMentions(
+        "Ping @Max Beckenbach and @Max, also @Alex Smith and @Alex Smith, cc @Maxwell. Later @Alex Smith.",
+        original,
+        names,
+      ),
+    ).toBe(
+      `Ping @<${id(2)}> and @<${id(1)}>, also @<${id(3)}> and @<${id(4)}>, cc @Maxwell. Later @Alex Smith.`,
+    );
+  });
+
+  it("replies to the comment that started a thread", () => {
+    expect(decodeRootCommentId(rows[0])).toBe(1);
   });
 });

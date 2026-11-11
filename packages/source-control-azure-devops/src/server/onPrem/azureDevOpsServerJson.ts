@@ -386,7 +386,132 @@ function toRepositoryPath(value: string | null | undefined): string | null {
   return path.length === 0 ? null : path;
 }
 
-export function decodeThreads(rows: ReadonlyArray<unknown>, pullRequestUrl: string): ServerThreads {
+/** Azure stores a mention as `@<identity id>`; the names fill in once read. */
+const MENTION = /@<([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})>/giu;
+
+export function mentionIdsIn(text: string): ReadonlyArray<string> {
+  return [...new Set([...text.matchAll(MENTION)].map((match) => match[1]!.toLowerCase()))];
+}
+
+export function mentionedIdentityIds(threads: ServerThreads): ReadonlyArray<string> {
+  return mentionIdsIn(threads.comments.map((comment) => comment.body).join("\n"));
+}
+
+const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+
+/**
+ * `@Display Name` back to `@<id>` for the identities `original` mentioned, longest name first so a
+ * name inside another cannot take its place. Two people with one name are restored in the order
+ * they were mentioned; a further mention of an ambiguous name stays text.
+ */
+export function restoreMentions(
+  edited: string,
+  original: string,
+  names: ReadonlyMap<string, string>,
+): string {
+  const idsByName = new Map<string, string[]>();
+  for (const match of original.matchAll(MENTION)) {
+    const id = match[1]!.toLowerCase();
+    const name = names.get(id);
+    if (name === undefined) continue;
+    const ids = idsByName.get(name) ?? [];
+    ids.push(id);
+    idsByName.set(name, ids);
+  }
+  let restored = edited;
+  for (const [name, ids] of [...idsByName].toSorted(
+    ([left], [right]) => right.length - left.length,
+  )) {
+    const distinct = [...new Set(ids)];
+    let seen = 0;
+    restored = restored.replace(new RegExp(`@${escapeRegExp(name)}(?![\\w])`, "gu"), (written) => {
+      const id = distinct.length === 1 ? distinct[0] : ids[seen];
+      seen += 1;
+      return id === undefined ? written : `@<${id}>`;
+    });
+  }
+  return restored;
+}
+
+const RawChangeTracking = Schema.Struct({
+  changeEntries: Schema.Array(
+    Schema.Struct({
+      changeTrackingId: OptionalInt,
+      item: Schema.optional(Schema.NullOr(Schema.Struct({ path: OptionalString }))),
+    }),
+  ),
+});
+
+/** Each changed file's change tracking id in an iteration, keyed by its path without `/`. */
+export function decodeChangeTrackingIds(body: unknown): ReadonlyMap<string, number> {
+  const [decoded] = decodeEach(RawChangeTracking, [body]);
+  return new Map(
+    (decoded?.changeEntries ?? []).flatMap((entry) => {
+      const path = toRepositoryPath(entry.item?.path);
+      return path === null || entry.changeTrackingId == null
+        ? []
+        : [[path, entry.changeTrackingId] as const];
+    }),
+  );
+}
+
+const RawCommentContent = Schema.Struct({ content: OptionalString });
+
+export function decodeCommentContent(body: unknown): string {
+  return decodeEach(RawCommentContent, [body])[0]?.content ?? "";
+}
+
+/** `@<id>` as `@Display Name` for the identities `names` knows, the rest as written. */
+export function withMentionNames(
+  threads: ServerThreads,
+  names: ReadonlyMap<string, string>,
+): ServerThreads {
+  if (names.size === 0) return threads;
+  const named = <C extends { readonly body: string }>(comment: C): C => ({
+    ...comment,
+    body: comment.body.replace(MENTION, (written, id: string) => {
+      const name = names.get(id.toLowerCase());
+      return name === undefined ? written : `@${name}`;
+    }),
+  });
+  return {
+    ...threads,
+    comments: threads.comments.map(named),
+    reviewThreads: threads.reviewThreads.map((thread) => ({
+      ...thread,
+      comments: thread.comments.map(named),
+    })),
+    overviewThreads: threads.overviewThreads.map((thread) => ({
+      ...thread,
+      comments: thread.comments.map(named),
+    })),
+  };
+}
+
+export function decodeIdentityNames(rows: ReadonlyArray<unknown>): ReadonlyMap<string, string> {
+  return new Map(
+    decodeEach(RawIdentityRecord, rows).flatMap((identity) => {
+      const name = trimmed(identity.providerDisplayName);
+      return name === null ? [] : [[identity.id.toLowerCase(), name] as const];
+    }),
+  );
+}
+
+/** The comment a reply in thread `rows` answers: its first, the one that started it. */
+export function decodeRootCommentId(thread: unknown): number | null {
+  const [decoded] = decodeEach(RawThread, [thread]);
+  const ids = (decoded?.comments ?? [])
+    .filter((comment) => (comment.parentCommentId ?? 0) === 0)
+    .map((comment) => comment.id);
+  return ids.length === 0 ? null : Math.min(...ids);
+}
+
+export function decodeThreads(
+  rows: ReadonlyArray<unknown>,
+  pullRequestUrl: string,
+  /** Set to mark which comments the viewer may edit: their own. */
+  viewerId?: string,
+): ServerThreads {
   const comments: PullRequestComment[] = [];
   const reviewThreads: PullRequestReviewThread[] = [];
   const overviewThreads: PullRequestOverviewThread[] = [];
@@ -417,6 +542,9 @@ export function decodeThreads(rows: ReadonlyArray<unknown>, pullRequestUrl: stri
         createdAt,
         ...(editedAt !== null && editedAt !== createdAt ? { editedAt } : {}),
         url,
+        ...(viewerId === undefined
+          ? {}
+          : { canEdit: comment.author?.id?.toLowerCase() === viewerId.toLowerCase() }),
       };
       threadComments.push(shared);
       comments.push({

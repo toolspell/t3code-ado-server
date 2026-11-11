@@ -1,6 +1,9 @@
 import type {
   PullRequestCapabilities,
   PullRequestCheck,
+  PullRequestReviewCommentDraft,
+  PullRequestReviewPosition,
+  PullRequestReviewVerdict,
   PullRequestListState,
   PullRequestViewerPermissions,
 } from "@t3tools/contracts";
@@ -51,18 +54,27 @@ import {
   decodeAccountName,
   decodeChecks,
   decodeCommits,
+  decodeChangeTrackingIds,
+  decodeCommentContent,
   decodeConnectionData,
   decodeIdentityIds,
+  decodeIdentityNames,
   decodeMergeCapabilities,
   decodePullRequest,
   decodeRefObjectId,
   decodeRefUpdateFailure,
   decodeRepository,
+  decodeRootCommentId,
   decodeThreads,
+  mentionedIdentityIds,
+  mentionIdsIn,
   pendingReviewerLogins,
   pullRequestUpdatedAt,
   reviewDecisionOf,
   type ServerPullRequest,
+  restoreMentions,
+  type ServerThreads,
+  withMentionNames,
 } from "./azureDevOpsServerJson.ts";
 
 const KIND = ServerDefinition.definition.kind;
@@ -84,7 +96,7 @@ const COMPLETION_POLLS = 10;
 
 const CAPABILITIES: PullRequestCapabilities = {
   diff: true,
-  comment: false,
+  comment: true,
   actions: [...ServerDefinition.definition.changeRequestActions],
   mergeMethods: ["merge", "squash", "rebase"],
   deleteBranch: true,
@@ -92,10 +104,16 @@ const CAPABILITIES: PullRequestCapabilities = {
   reactions: false,
   mentions: false,
   referenceSigils: [],
-  review: { inlineComment: false, rangeComment: false, reply: false, resolve: false, verdicts: [] },
+  review: {
+    inlineComment: true,
+    rangeComment: true,
+    reply: true,
+    resolve: true,
+    verdicts: ["comment", "approve", "request-changes"],
+  },
   // Identity search on Azure DevOps Server matches whole names only, so there is no picker yet.
   reviewers: { request: true, listCandidates: false, searchCandidates: false },
-  edit: { changeRequest: true, comment: false },
+  edit: { changeRequest: true, comment: true },
   // Azure's own viewed marks use an undocumented route and reset on every push.
   viewedFiles: "environment",
 };
@@ -154,6 +172,46 @@ const unreadUnlessUrgent = <A>(
       () => Effect.succeedNone,
     ),
   );
+
+const IDENTITY_NAME_CAPACITY = 1024;
+/** Past any line's end, so a comment covers its last line whole. */
+const LINE_END_OFFSET = 100_000;
+
+const VOTES: Record<PullRequestReviewVerdict, number | undefined> = {
+  approve: 10,
+  // "Waiting for the author", which keeps the pull request from completing.
+  "request-changes": -5,
+  comment: undefined,
+};
+
+function positionLine(position: PullRequestReviewPosition): {
+  readonly side: "right" | "left";
+  readonly line: number;
+} {
+  switch (position.kind) {
+    case "added":
+      return { side: "right", line: position.newLine };
+    case "deleted":
+      return { side: "left", line: position.oldLine };
+    case "context":
+      return position.side === "left"
+        ? { side: "left", line: position.oldLine }
+        : { side: "right", line: position.newLine };
+  }
+}
+
+/** The file and lines a review comment covers, on the side its last line is on. */
+export function threadContextOf(draft: PullRequestReviewCommentDraft) {
+  const end = positionLine(draft.position);
+  const start = draft.startPosition === undefined ? end : positionLine(draft.startPosition);
+  const first = start.side === end.side && start.line <= end.line ? start.line : end.line;
+  const path = end.side === "left" ? (draft.oldPath ?? draft.path) : draft.path;
+  return {
+    filePath: path.startsWith("/") ? path : `/${path}`,
+    [`${end.side}FileStart`]: { line: first, offset: 1 },
+    [`${end.side}FileEnd`]: { line: end.line, offset: LINE_END_OFFSET },
+  };
+}
 
 const unreadChecks = (name: string): PullRequestCheck => ({
   name,
@@ -325,6 +383,7 @@ export const make = Effect.gen(function* () {
     target: ServerRepositoryRef,
     pullRequest: ServerPullRequest,
     operation: string,
+    viewerId?: string,
   ) =>
     threadReads.withPermits(1)(
       api
@@ -333,7 +392,7 @@ export const make = Effect.gen(function* () {
           operation,
           path: `${pullRequestPath(target, pullRequest.number)}/threads`,
         })
-        .pipe(Effect.map((rows) => decodeThreads(rows, pullRequest.url))),
+        .pipe(Effect.map((rows) => decodeThreads(rows, pullRequest.url, viewerId))),
     );
 
   // A closed pull request rarely changes, so a list of many need not read each one's threads.
@@ -699,6 +758,97 @@ export const make = Effect.gen(function* () {
     },
   );
 
+  const postThread = (
+    target: ServerRepositoryRef,
+    number: number,
+    content: string,
+    operation: string,
+    threadContext?: ReturnType<typeof threadContextOf>,
+    pullRequestThreadContext?: {
+      readonly changeTrackingId: number;
+      readonly iterationContext: {
+        readonly firstComparingIteration: number;
+        readonly secondComparingIteration: number;
+      };
+    },
+  ) =>
+    api.request({
+      server: target.server,
+      operation,
+      method: "POST",
+      path: `${pullRequestPath(target, number)}/threads`,
+      body: {
+        comments: [{ parentCommentId: 0, content, commentType: 1 }],
+        status: "active",
+        ...(threadContext === undefined ? {} : { threadContext }),
+        ...(pullRequestThreadContext === undefined ? {} : { pullRequestThreadContext }),
+      },
+    });
+
+  /**
+   * The latest iteration and each file's change tracking id in it, which a file comment names so
+   * it follows its lines across later pushes. Empty when the pull request has no iterations.
+   */
+  const reviewTracking = Effect.fn("AzureDevOpsServerPullRequestProvider.reviewTracking")(
+    function* (target: ServerRepositoryRef, number: number) {
+      const latest = (yield* listIterations(target, number, "submitReview")).at(-1);
+      if (latest === undefined) return null;
+      const tracking = decodeChangeTrackingIds(
+        yield* api.request({
+          server: target.server,
+          operation: "submitReview",
+          path: `${pullRequestPath(target, number)}/iterations/${latest.id}/changes`,
+          query: { $top: CHANGE_ENTRIES_PER_PAGE },
+        }),
+      );
+      return { iteration: latest.id, tracking };
+    },
+  );
+
+  // Display names change rarely; a mention keeps its id either way.
+  const identityNames = new Map<string, string>();
+
+  /** Display names of `ids` on `server`, from the cache or one batched identity read. */
+  const identityNamesOf = Effect.fn("AzureDevOpsServerPullRequestProvider.identityNamesOf")(
+    function* (server: string, ids: ReadonlyArray<string>) {
+      const names = new Map<string, string>();
+      const unknown: string[] = [];
+      for (const id of ids) {
+        const name = identityNames.get(`${server}\0${id}`);
+        if (name === undefined) unknown.push(id);
+        else names.set(id, name);
+      }
+      if (unknown.length > 0) {
+        const named = yield* api
+          .requestList({
+            server,
+            operation: "identityNames",
+            path: "_apis/identities",
+            query: { identityIds: unknown.join(","), queryMembership: "None" },
+          })
+          .pipe(
+            Effect.map(decodeIdentityNames),
+            Effect.orElseSucceed((): ReadonlyMap<string, string> => new Map()),
+          );
+        if (identityNames.size > IDENTITY_NAME_CAPACITY) identityNames.clear();
+        for (const [id, name] of named) {
+          identityNames.set(`${server}\0${id}`, name);
+          names.set(id, name);
+        }
+      }
+      return names;
+    },
+  );
+
+  const withNamedMentions = Effect.fn("AzureDevOpsServerPullRequestProvider.withNamedMentions")(
+    function* (server: string, threads: ServerThreads) {
+      return withMentionNames(
+        threads,
+        yield* identityNamesOf(server, mentionedIdentityIds(threads)),
+      );
+    },
+  );
+
   const provider: PullRequestProviderApi = {
     kind: KIND,
     capabilities: CAPABILITIES,
@@ -903,9 +1053,18 @@ export const make = Effect.gen(function* () {
           input.number,
           "getChangeRequestActivity",
         );
+        const viewer = yield* viewerOf(target.server).pipe(Effect.option);
         const [threads, commits] = yield* Effect.all(
           [
-            readThreads(target, pullRequest, "getChangeRequestActivity").pipe(Effect.result),
+            readThreads(
+              target,
+              pullRequest,
+              "getChangeRequestActivity",
+              Option.getOrUndefined(viewer)?.id,
+            ).pipe(
+              Effect.flatMap((read) => withNamedMentions(target.server, read)),
+              Effect.result,
+            ),
             api
               .requestList({
                 server: target.server,
@@ -1172,10 +1331,109 @@ export const make = Effect.gen(function* () {
       },
       Effect.mapError(fail("setReviewerRequest")),
     ),
-    comment: () => unsupported("comment"),
-    submitReview: () => unsupported("submitReview"),
-    replyToThread: () => unsupported("replyToThread"),
-    setThreadResolution: () => unsupported("setThreadResolution"),
+    comment: Effect.fn("AzureDevOpsServerPullRequestProvider.comment")(
+      function* (input) {
+        const target = yield* locate(input);
+        yield* postThread(target, input.number, input.body, "comment");
+      },
+      Effect.mapError(fail("comment")),
+    ),
+
+    updateComment: Effect.fn("AzureDevOpsServerPullRequestProvider.updateComment")(
+      function* (input) {
+        const target = yield* locate(input);
+        const [threadId, commentId] = input.commentId.split(":");
+        const path = `${pullRequestPath(target, input.number)}/threads/${AzureDevOpsServerApi.encodePath(threadId ?? "")}/comments/${AzureDevOpsServerApi.encodePath(commentId ?? "")}`;
+        // The editor got mentions as names; the saved comment must keep Azure's own markup.
+        const original = decodeCommentContent(
+          yield* api.request({ server: target.server, operation: "updateComment", path }),
+        );
+        const names = yield* identityNamesOf(target.server, mentionIdsIn(original));
+        yield* api.request({
+          server: target.server,
+          operation: "updateComment",
+          method: "PATCH",
+          path,
+          body: { content: restoreMentions(input.body, original, names) },
+        });
+      },
+      Effect.mapError(fail("updateComment")),
+    ),
+
+    submitReview: Effect.fn("AzureDevOpsServerPullRequestProvider.submitReview")(
+      function* (input) {
+        const target = yield* locate(input);
+        const tracking =
+          input.comments.length === 0 ? null : yield* reviewTracking(target, input.number);
+        for (const draft of input.comments) {
+          const changeTrackingId = tracking?.tracking.get(draft.path.replace(/^\/+/u, ""));
+          yield* postThread(
+            target,
+            input.number,
+            draft.body,
+            "submitReview",
+            threadContextOf(draft),
+            tracking === null || changeTrackingId === undefined
+              ? undefined
+              : {
+                  changeTrackingId,
+                  // Equal iterations put the merge base on the left, as the diff shows it.
+                  iterationContext: {
+                    firstComparingIteration: tracking.iteration,
+                    secondComparingIteration: tracking.iteration,
+                  },
+                },
+          );
+        }
+        if (input.body.trim() !== "") {
+          yield* postThread(target, input.number, input.body, "submitReview");
+        }
+        const vote = VOTES[input.verdict];
+        if (vote === undefined) return;
+        // Voting adds the viewer as a reviewer when they were not one.
+        const viewer = yield* viewerOf(target.server);
+        yield* api.request({
+          server: target.server,
+          operation: "submitReview",
+          method: "PUT",
+          path: `${pullRequestPath(target, input.number)}/reviewers/${AzureDevOpsServerApi.encodePath(viewer.id)}`,
+          body: { vote },
+        });
+      },
+      Effect.mapError(fail("submitReview")),
+    ),
+
+    replyToThread: Effect.fn("AzureDevOpsServerPullRequestProvider.replyToThread")(
+      function* (input) {
+        const target = yield* locate(input);
+        const path = `${pullRequestPath(target, input.number)}/threads/${AzureDevOpsServerApi.encodePath(input.threadId)}`;
+        const root = decodeRootCommentId(
+          yield* api.request({ server: target.server, operation: "replyToThread", path }),
+        );
+        yield* api.request({
+          server: target.server,
+          operation: "replyToThread",
+          method: "POST",
+          path: `${path}/comments`,
+          body: { parentCommentId: root ?? 1, content: input.body, commentType: 1 },
+        });
+      },
+      Effect.mapError(fail("replyToThread")),
+    ),
+
+    setThreadResolution: Effect.fn("AzureDevOpsServerPullRequestProvider.setThreadResolution")(
+      function* (input) {
+        const target = yield* locate(input);
+        yield* api.request({
+          server: target.server,
+          operation: "setThreadResolution",
+          method: "PATCH",
+          path: `${pullRequestPath(target, input.number)}/threads/${AzureDevOpsServerApi.encodePath(input.threadId)}`,
+          body: { status: input.resolved ? "fixed" : "active" },
+        });
+      },
+      Effect.mapError(fail("setThreadResolution")),
+    ),
     setReaction: () => unsupported("setReaction"),
   };
 

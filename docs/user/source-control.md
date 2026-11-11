@@ -128,6 +128,9 @@ Add one entry per collection. Repositories whose remote points at that collectio
 SSH, then show their pull requests. Tokens are kept in the server's secret store; to replace one,
 choose **Edit**.
 
+Approving a pull request votes **Approved** and requesting changes votes **Waiting for author**.
+Branch policies show as checks, and the merge methods follow the branch's merge strategy policy.
+
 If the server uses a certificate from your company's or its own certificate authority, install that
 certificate in the operating system's certificate store on the machine running T3 Code, or point
 `NODE_EXTRA_CA_CERTS` at it and restart T3 Code.
