@@ -102,5 +102,8 @@ it.effect("looks up the repository asked for in the checkout's collection", () =
       sshUrl: "ssh://ado2022.fritz.box:2222/DefaultCollection/Payments/_git/Api",
     });
     assert.deepStrictEqual(paths, ["Payments/_apis/git/repositories/Api"]);
+    // A bare name is a repository in the checkout's project.
+    yield* provider.getRepositoryCloneUrls({ cwd: "/repo", repository: "Api" });
+    assert.strictEqual(paths.at(-1), "DemoProjectTwo/_apis/git/repositories/Api");
   }).pipe(Effect.provide(layer));
 });

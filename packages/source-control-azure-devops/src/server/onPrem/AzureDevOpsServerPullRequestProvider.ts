@@ -1,5 +1,6 @@
 import type {
   PullRequestCapabilities,
+  PullRequestCheck,
   PullRequestListState,
   PullRequestViewerPermissions,
 } from "@t3tools/contracts";
@@ -15,6 +16,7 @@ import {
 } from "@t3tools/source-control-core/server/PullRequestProvider";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Result from "effect/Result";
 import * as Semaphore from "effect/Semaphore";
 
@@ -125,6 +127,14 @@ const STATUS_FILTER: Record<PullRequestListState, string> = {
   merged: "completed",
   all: "all",
 };
+
+const unreadChecks = (name: string): PullRequestCheck => ({
+  name,
+  status: "pending",
+  description: `Azure DevOps Server could not list the ${name.toLowerCase()}.`,
+  url: null,
+  placeholder: true,
+});
 
 const EMPTY_DIFF_SLICE: ProviderDiffSlice = { patch: "", truncated: false, nextCursor: null };
 const EMPTY_ITEM: AzureDevOpsItemContent = { contents: "", isBinary: false };
@@ -449,25 +459,33 @@ export const make = Effect.gen(function* () {
             },
             preview: true,
           })
-          .pipe(Effect.orElseSucceed((): ReadonlyArray<unknown> => [])),
+          .pipe(Effect.option),
         api
           .requestList({
             server: target.server,
             operation: "getChangeRequestChecks",
             path: `${pullRequestPath(target, pullRequest.number)}/statuses`,
           })
-          .pipe(Effect.orElseSucceed((): ReadonlyArray<unknown> => [])),
+          .pipe(Effect.option),
       ],
       { concurrency: 2 },
     ).pipe(
       Effect.map(([policyEvaluations, statuses]) => ({
-        checks: decodeChecks({
-          collectionUrl: target.server,
-          project: pullRequest.location.project,
-          policyEvaluations,
-          statuses,
+        checks: [
+          ...decodeChecks({
+            collectionUrl: target.server,
+            project: pullRequest.location.project,
+            policyEvaluations: Option.getOrElse(policyEvaluations, () => []),
+            statuses: Option.getOrElse(statuses, () => []),
+          }),
+          // An unread source must not let the rest pass for every check there is.
+          ...(Option.isNone(policyEvaluations) ? [unreadChecks("Branch policies")] : []),
+          ...(Option.isNone(statuses) ? [unreadChecks("Pull request statuses")] : []),
+        ],
+        mergeCapabilities: Option.match(policyEvaluations, {
+          onNone: () => ({ merge: true, squash: true, rebase: true }),
+          onSome: decodeMergeCapabilities,
         }),
-        mergeCapabilities: decodeMergeCapabilities(policyEvaluations),
       })),
     );
 

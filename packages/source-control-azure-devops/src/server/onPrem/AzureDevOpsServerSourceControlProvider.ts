@@ -161,7 +161,7 @@ export const make = Effect.gen(function* () {
     }
     const [first = "", second] = input.repository.split("/").filter((part) => part.length > 0);
     return second === undefined
-      ? { server: target.server, project: first, repository: first }
+      ? { server: target.server, project: target.project, repository: first }
       : { server: target.server, project: first, repository: second };
   });
 

@@ -33,12 +33,21 @@ const threads: Record<number, ReadonlyArray<unknown>> = {
   25: [],
 };
 
-function makeLayer(lists: { readonly pullRequests: ReadonlyArray<unknown> }) {
+const UNREADABLE = Symbol("unreadable");
+
+function makeLayer(lists: {
+  readonly pullRequests: ReadonlyArray<unknown>;
+  readonly answer?: (input: AzureDevOpsServerApi.AzureDevOpsServerRequest) => unknown;
+}) {
   const paths: string[] = [];
   const queries: Array<Readonly<Record<string, unknown>> | undefined> = [];
+  const calls: AzureDevOpsServerApi.AzureDevOpsServerRequest[] = [];
   const answer = (input: AzureDevOpsServerApi.AzureDevOpsServerRequest): unknown => {
     paths.push(input.path);
     queries.push(input.query);
+    calls.push(input);
+    const special = lists.answer?.(input);
+    if (special !== undefined) return special;
     if (input.path === `${BASE}/pullrequests`) return { value: lists.pullRequests };
     const thread = /pullRequests\/(\d+)\/threads$/u.exec(input.path);
     if (thread) return { value: threads[Number(thread[1])] ?? [] };
@@ -68,11 +77,25 @@ function makeLayer(lists: { readonly pullRequests: ReadonlyArray<unknown> }) {
     requestText: (input) => Effect.sync(() => JSON.stringify(answer(input))),
     request: (input) => Effect.sync(() => answer(input)),
     requestList: (input) =>
-      Effect.sync(() => (answer(input) as { readonly value: ReadonlyArray<unknown> }).value),
+      Effect.suspend(() => {
+        const body = answer(input);
+        return body === UNREADABLE
+          ? Effect.fail(
+              new AzureDevOpsServerApi.AzureDevOpsServerApiError({
+                server: SERVER,
+                operation: "test",
+                status: 403,
+                reason: "forbidden",
+                detail: "No.",
+              }),
+            )
+          : Effect.succeed((body as { readonly value: ReadonlyArray<unknown> }).value);
+      }),
   });
   return {
     paths,
     queries,
+    calls,
     layer: Layer.succeed(AzureDevOpsServerApi.AzureDevOpsServerApi, api),
   };
 }
@@ -153,5 +176,28 @@ it.effect("fails a file it cannot read instead of showing it as empty", () => {
       }),
     );
     assert.strictEqual(failure.reason, "failed");
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("marks checks it could not list instead of passing on the rest", () => {
+  const { layer } = makeLayer({
+    pullRequests: [],
+    answer: (input) =>
+      input.path.endsWith("/policy/evaluations")
+        ? UNREADABLE
+        : input.path.endsWith("/statuses")
+          ? { value: [{ id: 1, state: "succeeded", context: { name: "deploy" } }] }
+          : undefined,
+  });
+  return Effect.gen(function* () {
+    const provider = yield* AzureDevOpsServerPullRequestProvider.make;
+    const { checks } = yield* provider.getChangeRequestChecks!({ ...ref, number: 26 });
+    assert.deepStrictEqual(
+      checks.map((check) => [check.name, check.status, check.placeholder ?? false]),
+      [
+        ["deploy", "success", false],
+        ["Branch policies", "pending", true],
+      ],
+    );
   }).pipe(Effect.provide(layer));
 });
