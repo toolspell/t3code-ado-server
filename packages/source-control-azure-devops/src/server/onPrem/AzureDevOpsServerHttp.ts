@@ -1,5 +1,6 @@
-// @effect-diagnostics nodeBuiltinImport:off -- TLS trust needs the CA lists and agents only Node exposes.
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- NodeHttpClient takes Node's own agents.
 import * as NodeHttp from "node:http";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- Only a Node agent sets the CAs it trusts.
 import * as NodeHttps from "node:https";
 import * as NodeTls from "node:tls";
 
