@@ -22,11 +22,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Schema from "effect/Schema";
 
 import * as ServerDefinition from "../../shared/serverDefinition.ts";
-import {
-  AzureDevOpsServerApi,
-  AzureDevOpsServerApiError,
-  encodePath,
-} from "./AzureDevOpsServerApi.ts";
+import * as AzureDevOpsServerApi from "./AzureDevOpsServerApi.ts";
 import type { ServerRepositoryRef } from "./azureDevOpsServerConnections.ts";
 import {
   decodeConnectionData,
@@ -39,7 +35,7 @@ import {
 } from "./azureDevOpsServerJson.ts";
 
 const KIND = ServerDefinition.definition.kind;
-const isApiError = Schema.is(AzureDevOpsServerApiError);
+const isApiError = Schema.is(AzureDevOpsServerApi.AzureDevOpsServerApiError);
 /** Each server gets its own budget inside discovery's three seconds. */
 const PROBE_TIMEOUT = Duration.millis(2_500);
 
@@ -51,7 +47,7 @@ const STATUS_FILTER: Record<ChangeRequestState | "all", string> = {
 };
 
 const repositoryPath = (target: Pick<ServerRepositoryRef, "project" | "repository">) =>
-  `${encodePath(target.project)}/_apis/git/repositories/${encodePath(target.repository)}`;
+  `${AzureDevOpsServerApi.encodePath(target.project)}/_apis/git/repositories/${AzureDevOpsServerApi.encodePath(target.repository)}`;
 
 function toChangeRequest(pullRequest: ServerPullRequest, updatedAt: string): ChangeRequest {
   return {
@@ -83,7 +79,7 @@ function pullRequestNumberOf(reference: string): number | null {
 }
 
 export const make = Effect.gen(function* () {
-  const api = yield* AzureDevOpsServerApi;
+  const api = yield* AzureDevOpsServerApi.AzureDevOpsServerApi;
   const host = yield* SourceControlHost.SourceControlHost;
   const fileSystem = yield* FileSystem.FileSystem;
   const { git } = host;
@@ -180,7 +176,7 @@ export const make = Effect.gen(function* () {
               }),
             );
       if (pullRequest !== null) return pullRequest;
-      return yield* new AzureDevOpsServerApiError({
+      return yield* new AzureDevOpsServerApi.AzureDevOpsServerApiError({
         server: target.server,
         operation,
         status: null,
@@ -279,7 +275,7 @@ export const make = Effect.gen(function* () {
         );
         const url = trimOptionalString(repository?.remoteUrl);
         if (repository === null || url === null) {
-          return yield* new AzureDevOpsServerApiError({
+          return yield* new AzureDevOpsServerApi.AzureDevOpsServerApiError({
             server: target.server,
             operation: "getRepositoryCloneUrls",
             status: null,
@@ -339,7 +335,7 @@ export const make = Effect.gen(function* () {
           "checkoutChangeRequest",
         );
         if (pullRequest.isCrossRepository) {
-          return yield* new AzureDevOpsServerApiError({
+          return yield* new AzureDevOpsServerApi.AzureDevOpsServerApiError({
             server: target.server,
             operation: "checkoutChangeRequest",
             status: null,
@@ -383,7 +379,7 @@ export const make = Effect.gen(function* () {
 
 /** One account per configured server, so a server that refuses its token shows on its own. */
 export const makeDiscovery = Effect.gen(function* () {
-  const api = yield* AzureDevOpsServerApi;
+  const api = yield* AzureDevOpsServerApi.AzureDevOpsServerApi;
 
   const probeServer = (server: string) =>
     api

@@ -41,11 +41,7 @@ import {
   type AzureDevOpsItemContent,
   type AzureDevOpsIteration,
 } from "../azureDevOpsPullRequestJson.ts";
-import {
-  AzureDevOpsServerApi,
-  AzureDevOpsServerApiError,
-  encodePath,
-} from "./AzureDevOpsServerApi.ts";
+import * as AzureDevOpsServerApi from "./AzureDevOpsServerApi.ts";
 import type { ServerRepositoryRef } from "./azureDevOpsServerConnections.ts";
 import {
   decodeAccountName,
@@ -107,7 +103,9 @@ const UNAVAILABLE_REQUIREMENT = {
     "The server refused the saved personal access token. Replace it in Settings → Source control → Azure DevOps Server.",
 };
 
-function failureOf(error: AzureDevOpsServerApiError): PullRequestProviderFailure {
+function failureOf(
+  error: AzureDevOpsServerApi.AzureDevOpsServerApiError,
+): PullRequestProviderFailure {
   switch (error.reason) {
     case "not-configured":
       return { reason: "missing-tool", accessHint: error.detail };
@@ -133,7 +131,9 @@ const STATUS_FILTER: Record<PullRequestListState, string> = {
  * A source of checks that cannot be read shows as unread, except when the token stopped working or
  * the server asked to slow down: those must reach the caller, which backs off or asks to sign in.
  */
-const unreadUnlessUrgent = <A>(read: Effect.Effect<A, AzureDevOpsServerApiError>) =>
+const unreadUnlessUrgent = <A>(
+  read: Effect.Effect<A, AzureDevOpsServerApi.AzureDevOpsServerApiError>,
+) =>
   read.pipe(
     Effect.asSome,
     Effect.catchIf(
@@ -157,7 +157,7 @@ const EMPTY_ITEM: AzureDevOpsItemContent = { contents: "", isBinary: false };
 const toItemPath = (path: string) => (path.startsWith("/") ? path : `/${path}`);
 
 const repositoryPath = (target: Pick<ServerRepositoryRef, "project" | "repository">) =>
-  `${encodePath(target.project)}/_apis/git/repositories/${encodePath(target.repository)}`;
+  `${AzureDevOpsServerApi.encodePath(target.project)}/_apis/git/repositories/${AzureDevOpsServerApi.encodePath(target.repository)}`;
 
 const pullRequestPath = (target: ServerRepositoryRef, number: number) =>
   `${repositoryPath(target)}/pullRequests/${number}`;
@@ -213,11 +213,11 @@ function toSummary(
 }
 
 export const make = Effect.gen(function* () {
-  const api = yield* AzureDevOpsServerApi;
+  const api = yield* AzureDevOpsServerApi.AzureDevOpsServerApi;
   const itemReads = yield* Semaphore.make(MAX_ITEM_READS);
   const threadReads = yield* Semaphore.make(THREAD_READ_CONCURRENCY);
 
-  const fail = (operation: string) => (error: AzureDevOpsServerApiError) =>
+  const fail = (operation: string) => (error: AzureDevOpsServerApi.AzureDevOpsServerApiError) =>
     new PullRequestProviderError({
       provider: KIND,
       operation,
@@ -238,7 +238,13 @@ export const make = Effect.gen(function* () {
 
   const unreadable = (server: string, operation: string, detail: string) =>
     Effect.fail(
-      new AzureDevOpsServerApiError({ server, operation, status: null, reason: "failed", detail }),
+      new AzureDevOpsServerApi.AzureDevOpsServerApiError({
+        server,
+        operation,
+        status: null,
+        reason: "failed",
+        detail,
+      }),
     );
 
   const locate = (input: { readonly host: string; readonly repository: string }) =>
@@ -378,7 +384,7 @@ export const make = Effect.gen(function* () {
       collected: ReadonlyArray<AzureDevOpsChangeEntry>,
     ): Effect.Effect<
       { readonly changes: ReadonlyArray<AzureDevOpsChangeEntry>; readonly truncated: boolean },
-      AzureDevOpsServerApiError
+      AzureDevOpsServerApi.AzureDevOpsServerApiError
     > =>
       api
         .requestText({
@@ -478,7 +484,7 @@ export const make = Effect.gen(function* () {
           .requestList({
             server: target.server,
             operation: "getChangeRequestChecks",
-            path: `${encodePath(pullRequest.location.project)}/_apis/policy/evaluations`,
+            path: `${AzureDevOpsServerApi.encodePath(pullRequest.location.project)}/_apis/policy/evaluations`,
             query: {
               artifactId: `vstfs:///CodeReview/CodeReviewId/${pullRequest.location.projectId}/${pullRequest.number}`,
             },
