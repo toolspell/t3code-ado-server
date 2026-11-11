@@ -35,7 +35,7 @@ export class AzureDevOpsServerHttp extends Context.Service<
 export const make = Effect.gen(function* () {
   let current:
     | {
-        readonly key: string;
+        readonly certificates: ReadonlyArray<string>;
         readonly client: HttpClient.HttpClient;
         readonly agents: { readonly http: NodeHttp.Agent; readonly https: NodeHttps.Agent };
       }
@@ -51,8 +51,12 @@ export const make = Effect.gen(function* () {
   // the default list instead of keeping the one it started with.
   const client = Effect.gen(function* () {
     const certificates = trustedCertificates();
-    const key = `${certificates.length}:${certificates.reduce((total, certificate) => total + certificate.length, 0)}`;
-    if (current?.key === key) return current.client;
+    if (
+      current?.certificates.length === certificates.length &&
+      current.certificates.every((certificate, index) => certificate === certificates[index])
+    ) {
+      return current.client;
+    }
     const agents = {
       http: new NodeHttp.Agent({ keepAlive: true }),
       https: new NodeHttps.Agent({ keepAlive: true, ca: [...certificates] }),
@@ -60,7 +64,7 @@ export const make = Effect.gen(function* () {
     const httpClient = yield* NodeHttpClient.makeNodeHttp.pipe(
       Effect.provideService(NodeHttpClient.HttpAgent, agents),
     );
-    current = { key, client: httpClient, agents };
+    current = { certificates, client: httpClient, agents };
     return httpClient;
   });
 
