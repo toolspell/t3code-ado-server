@@ -104,8 +104,13 @@ it.effect("maps server answers to reasons a reader can act on", () => {
   const answers: Record<string, Response> = {
     "/defaultcollection/401": new Response("", { status: 401 }),
     "/defaultcollection/403": Response.json(
-      { message: "TF401027: You need Contribute." },
+      { message: "TF401027: You need Contribute. See https://tfs.corp/help?sig=secret." },
       { status: 403 },
+    ),
+    // A proxy in front of the server answering in its own words.
+    "/defaultcollection/500": Response.json(
+      { message: "Upstream https://internal.example/x?token=abc refused" },
+      { status: 500 },
     ),
     "/defaultcollection/429": new Response("", { status: 429, headers: { "retry-after": "30" } }),
     "/defaultcollection/400": Response.json(
@@ -125,14 +130,16 @@ it.effect("maps server answers to reasons a reader can act on", () => {
     const forbidden = yield* failed("403");
     assert.deepStrictEqual(
       [forbidden.reason, forbidden.detail],
-      ["forbidden", "TF401027: You need Contribute."],
+      ["forbidden", "TF401027: You need Contribute. See https://tfs.corp/help"],
     );
     const limited = yield* failed("429");
     assert.strictEqual(limited.reason, "rate-limited");
     assert.strictEqual(limited.retryAt, 30_000);
     const old = yield* failed("400");
     assert.strictEqual(old.reason, "unsupported-server");
-    assert.match(old.detail, /2022 or newer/u);
+    assert.match(old.detail, /2022 or newer.*up to 5\.0/u);
+    // Text that is not Azure's own error stays in the cause, out of what clients see.
+    assert.strictEqual((yield* failed("500")).detail, "The server answered HTTP 500.");
   }).pipe(Effect.provide(layer));
 });
 

@@ -73,6 +73,7 @@ const MAX_CHANGE_ENTRIES = 10_000;
 const VIEWER_TTL_MS = 5 * 60_000;
 const CLOSED_ACTIVITY_TTL_MS = 10 * 60_000;
 const CLOSED_ACTIVITY_CAPACITY = 512;
+const MAX_LIST_PAGES = 5;
 
 const CAPABILITIES: PullRequestCapabilities = {
   diff: true,
@@ -127,6 +128,19 @@ const STATUS_FILTER: Record<PullRequestListState, string> = {
   merged: "completed",
   all: "all",
 };
+
+/**
+ * A source of checks that cannot be read shows as unread, except when the token stopped working or
+ * the server asked to slow down: those must reach the caller, which backs off or asks to sign in.
+ */
+const unreadUnlessUrgent = <A>(read: Effect.Effect<A, AzureDevOpsServerApiError>) =>
+  read.pipe(
+    Effect.asSome,
+    Effect.catchIf(
+      (error) => error.reason !== "rate-limited" && error.reason !== "unauthenticated",
+      () => Effect.succeedNone,
+    ),
+  );
 
 const unreadChecks = (name: string): PullRequestCheck => ({
   name,
@@ -305,27 +319,38 @@ export const make = Effect.gen(function* () {
 
   // A closed pull request rarely changes, so a list of many need not read each one's threads.
   const closedActivity = new Map<string, { readonly updatedAt: string; readonly at: number }>();
+  const activityKey = (target: ServerRepositoryRef, pullRequest: ServerPullRequest) =>
+    `${target.server}\0${pullRequest.location.repositoryId}\0${pullRequest.number}\0${pullRequest.closedAt ?? ""}`;
+
+  /** Dates a pull request by its threads and keeps a closed one's date for the list. */
+  const datedBy = Effect.fn("AzureDevOpsServerPullRequestProvider.datedBy")(function* (
+    target: ServerRepositoryRef,
+    pullRequest: ServerPullRequest,
+    threadsUpdatedAt: string | null,
+  ) {
+    const updatedAt = pullRequestUpdatedAt(pullRequest, threadsUpdatedAt);
+    if (pullRequest.state !== "open") {
+      const now = yield* Clock.currentTimeMillis;
+      if (closedActivity.size >= CLOSED_ACTIVITY_CAPACITY) {
+        const oldest = closedActivity.keys().next().value;
+        if (oldest !== undefined) closedActivity.delete(oldest);
+      }
+      closedActivity.set(activityKey(target, pullRequest), { updatedAt, at: now });
+    }
+    return updatedAt;
+  });
 
   const updatedAtOf = Effect.fn("AzureDevOpsServerPullRequestProvider.updatedAtOf")(function* (
     target: ServerRepositoryRef,
     pullRequest: ServerPullRequest,
   ) {
-    const key = `${target.server}\0${pullRequest.location.repositoryId}\0${pullRequest.number}\0${pullRequest.closedAt ?? ""}`;
-    const now = yield* Clock.currentTimeMillis;
     if (pullRequest.state !== "open") {
-      const held = closedActivity.get(key);
+      const now = yield* Clock.currentTimeMillis;
+      const held = closedActivity.get(activityKey(target, pullRequest));
       if (held !== undefined && now - held.at < CLOSED_ACTIVITY_TTL_MS) return held.updatedAt;
     }
     const threads = yield* readThreads(target, pullRequest, "listChangeRequests");
-    const updatedAt = pullRequestUpdatedAt(pullRequest, threads.lastUpdatedAt);
-    if (pullRequest.state !== "open") {
-      if (closedActivity.size >= CLOSED_ACTIVITY_CAPACITY) {
-        const oldest = closedActivity.keys().next().value;
-        if (oldest !== undefined) closedActivity.delete(oldest);
-      }
-      closedActivity.set(key, { updatedAt, at: now });
-    }
-    return updatedAt;
+    return yield* datedBy(target, pullRequest, threads.lastUpdatedAt);
   });
 
   const listIterations = (target: ServerRepositoryRef, number: number, operation: string) =>
@@ -459,14 +484,14 @@ export const make = Effect.gen(function* () {
             },
             preview: true,
           })
-          .pipe(Effect.option),
+          .pipe(unreadUnlessUrgent),
         api
           .requestList({
             server: target.server,
             operation: "getChangeRequestChecks",
             path: `${pullRequestPath(target, pullRequest.number)}/statuses`,
           })
-          .pipe(Effect.option),
+          .pipe(unreadUnlessUrgent),
       ],
       { concurrency: 2 },
     ).pipe(
@@ -524,42 +549,62 @@ export const make = Effect.gen(function* () {
         const target = yield* locate(input);
         const viewer = input.involvement === "all" ? null : yield* viewerOf(target.server);
         const skip = input.cursor?.delivered ?? 0;
-        const top = input.limit + 1;
-        const rows = yield* api.requestList({
-          server: target.server,
-          operation: "listChangeRequests",
-          path: `${repositoryPath(target)}/pullrequests`,
-          query: {
-            "searchCriteria.status": STATUS_FILTER[input.state],
-            ...(viewer !== null && input.involvement === "authored"
-              ? { "searchCriteria.creatorId": viewer.id }
-              : {}),
-            ...(viewer !== null && input.involvement === "reviewing"
-              ? { "searchCriteria.reviewerId": viewer.id }
-              : {}),
-            $top: top,
-            ...(skip === 0 ? {} : { $skip: skip }),
-          },
-        });
-        const decoded = rows.flatMap((row, index) => {
-          const pullRequest = decodePullRequest(target.server, row);
-          return pullRequest === null ? [] : [{ pullRequest, index }];
-        });
-        const kept = decoded.slice(0, input.limit);
-        const consumed = kept.length < input.limit ? rows.length : (kept.at(-1)?.index ?? -1) + 1;
+        // Rows that do not decode still count toward the offset, and a page of only those must
+        // not end the list before the rows behind it.
+        const kept: ServerPullRequest[] = [];
+        let consumed = 0;
+        let truncated = true;
+        for (let page = 0; page < MAX_LIST_PAGES; page++) {
+          const remaining = input.limit - kept.length;
+          const top = remaining + 1;
+          const offset = skip + consumed;
+          const rows = yield* api.requestList({
+            server: target.server,
+            operation: "listChangeRequests",
+            path: `${repositoryPath(target)}/pullrequests`,
+            query: {
+              "searchCriteria.status": STATUS_FILTER[input.state],
+              ...(viewer !== null && input.involvement === "authored"
+                ? { "searchCriteria.creatorId": viewer.id }
+                : {}),
+              ...(viewer !== null && input.involvement === "reviewing"
+                ? { "searchCriteria.reviewerId": viewer.id }
+                : {}),
+              $top: top,
+              ...(offset === 0 ? {} : { $skip: offset }),
+            },
+          });
+          const decoded = rows.flatMap((row, index) => {
+            const pullRequest = decodePullRequest(target.server, row);
+            return pullRequest === null ? [] : [{ pullRequest, index }];
+          });
+          const taken = decoded.slice(0, remaining);
+          kept.push(...taken.map(({ pullRequest }) => pullRequest));
+          if (taken.length === remaining) {
+            const used = (taken.at(-1)?.index ?? -1) + 1;
+            consumed += used;
+            truncated = rows.length === top || used < rows.length;
+            break;
+          }
+          consumed += rows.length;
+          if (rows.length < top) {
+            truncated = false;
+            break;
+          }
+        }
+        // A conversation that cannot be read fails the list rather than date a row too early,
+        // which would make every newer reading of it look stale.
         const items = yield* Effect.forEach(
           kept,
-          ({ pullRequest }) =>
+          (pullRequest) =>
             updatedAtOf(target, pullRequest).pipe(
-              // One unreadable conversation must not hide the whole list.
-              Effect.orElseSucceed(() => pullRequestUpdatedAt(pullRequest, null)),
               Effect.map((updatedAt) => toChangeRequest(pullRequest, updatedAt)),
             ),
           { concurrency: THREAD_READ_CONCURRENCY },
         );
         return {
           items,
-          truncated: rows.length === top || consumed < rows.length,
+          truncated,
           cursorAdvance: consumed,
           // Azure orders by creation, which offset pages keep stable.
           continues: true,
@@ -594,7 +639,7 @@ export const make = Effect.gen(function* () {
         const target = yield* locate(input);
         const pullRequest = yield* readPullRequest(target, input.number, "getChangeRequestSummary");
         const threads = yield* readThreads(target, pullRequest, "getChangeRequestSummary");
-        return toSummary(pullRequest, pullRequestUpdatedAt(pullRequest, threads.lastUpdatedAt));
+        return toSummary(pullRequest, yield* datedBy(target, pullRequest, threads.lastUpdatedAt));
       },
       Effect.mapError(fail("getChangeRequestSummary")),
     ),
@@ -634,7 +679,10 @@ export const make = Effect.gen(function* () {
                 Effect.orElseSucceed(() => 0),
               );
         const detail: ProviderChangeRequestDetail = {
-          ...toChangeRequest(pullRequest, pullRequestUpdatedAt(pullRequest, threads.lastUpdatedAt)),
+          ...toChangeRequest(
+            pullRequest,
+            yield* datedBy(target, pullRequest, threads.lastUpdatedAt),
+          ),
           body: pullRequest.body,
           // The trial merge's source commit can lag behind a new push; the iteration cannot.
           headSha: latest?.headCommit ?? pullRequest.headSha,

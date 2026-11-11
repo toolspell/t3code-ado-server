@@ -34,6 +34,7 @@ const threads: Record<number, ReadonlyArray<unknown>> = {
 };
 
 const UNREADABLE = Symbol("unreadable");
+const THROTTLED = Symbol("throttled");
 
 function makeLayer(lists: {
   readonly pullRequests: ReadonlyArray<unknown>;
@@ -79,13 +80,13 @@ function makeLayer(lists: {
     requestList: (input) =>
       Effect.suspend(() => {
         const body = answer(input);
-        return body === UNREADABLE
+        return body === UNREADABLE || body === THROTTLED
           ? Effect.fail(
               new AzureDevOpsServerApi.AzureDevOpsServerApiError({
                 server: SERVER,
                 operation: "test",
-                status: 403,
-                reason: "forbidden",
+                status: body === THROTTLED ? 429 : 403,
+                reason: body === THROTTLED ? "rate-limited" : "forbidden",
                 detail: "No.",
               }),
             )
@@ -179,6 +180,18 @@ it.effect("fails a file it cannot read instead of showing it as empty", () => {
   }).pipe(Effect.provide(layer));
 });
 
+it.effect("lets a throttled check read through so the caller backs off", () => {
+  const { layer } = makeLayer({
+    pullRequests: [],
+    answer: (input) => (input.path.endsWith("/policy/evaluations") ? THROTTLED : undefined),
+  });
+  return Effect.gen(function* () {
+    const provider = yield* AzureDevOpsServerPullRequestProvider.make;
+    const failure = yield* Effect.flip(provider.getChangeRequestChecks!({ ...ref, number: 26 }));
+    assert.strictEqual(failure.reason, "rate-limited");
+  }).pipe(Effect.provide(layer));
+});
+
 it.effect("marks checks it could not list instead of passing on the rest", () => {
   const { layer } = makeLayer({
     pullRequests: [],
@@ -197,6 +210,86 @@ it.effect("marks checks it could not list instead of passing on the rest", () =>
       [
         ["deploy", "success", false],
         ["Branch policies", "pending", true],
+      ],
+    );
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("keeps a closed pull request's list date in step with a newer detail read", () => {
+  let threadAt = "2026-11-11T10:00:00Z";
+  const closed = pullRequest(30, { status: "completed", closedDate: "2026-11-11T09:00:00Z" });
+  const { layer } = makeLayer({
+    pullRequests: [closed],
+    answer: (input) =>
+      input.path === `${BASE}/pullRequests/30/threads`
+        ? { value: [{ id: 1, lastUpdatedDate: threadAt, comments: [] }] }
+        : input.path === `${BASE}/pullRequests/30`
+          ? closed
+          : undefined,
+  });
+  return Effect.gen(function* () {
+    const provider = yield* AzureDevOpsServerPullRequestProvider.make;
+    const list = () =>
+      provider
+        .listChangeRequests({ ...ref, state: "merged", involvement: "all", viewer: "v", limit: 5 })
+        .pipe(Effect.map((page) => page.items[0]?.updatedAt));
+    assert.strictEqual(yield* list(), "2026-11-11T10:00:00.000Z");
+    // A comment after the merge: the detail sees it, and the cached list date must follow.
+    threadAt = "2026-11-11T12:00:00Z";
+    assert.strictEqual(
+      (yield* provider.getChangeRequest({ ...ref, number: 30 })).updatedAt,
+      "2026-11-11T12:00:00.000Z",
+    );
+    assert.strictEqual(yield* list(), "2026-11-11T12:00:00.000Z");
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("fails the list rather than date a row by a conversation it could not read", () => {
+  const { layer } = makeLayer({
+    pullRequests: [pullRequest(26)],
+    answer: (input) => (input.path.endsWith("/pullRequests/26/threads") ? UNREADABLE : undefined),
+  });
+  return Effect.gen(function* () {
+    const provider = yield* AzureDevOpsServerPullRequestProvider.make;
+    const result = yield* provider
+      .listChangeRequests({ ...ref, state: "open", involvement: "all", viewer: "v", limit: 5 })
+      .pipe(Effect.result);
+    assert.strictEqual(result._tag, "Failure");
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("reads past a page of rows that do not decode", () => {
+  const { layer, queries } = makeLayer({
+    pullRequests: [],
+    answer: (input) =>
+      input.path === `${BASE}/pullrequests`
+        ? input.query?.$skip === undefined
+          ? { value: [{ broken: 1 }, { broken: 2 }, { broken: 3 }] }
+          : { value: [pullRequest(25)] }
+        : undefined,
+  });
+  return Effect.gen(function* () {
+    const provider = yield* AzureDevOpsServerPullRequestProvider.make;
+    const page = yield* provider.listChangeRequests({
+      ...ref,
+      state: "open",
+      involvement: "all",
+      viewer: "v",
+      limit: 2,
+    });
+    assert.deepStrictEqual(
+      page.items.map((item) => item.number),
+      [25],
+    );
+    assert.strictEqual(page.cursorAdvance, 4);
+    assert.isFalse(page.truncated);
+    assert.deepStrictEqual(
+      queries
+        .filter((query) => query?.$top !== undefined)
+        .map((query) => [query?.$top, query?.$skip]),
+      [
+        [3, undefined],
+        [3, 3],
       ],
     );
   }).pipe(Effect.provide(layer));

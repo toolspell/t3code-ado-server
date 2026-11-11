@@ -158,17 +158,27 @@ const ErrorBody = Schema.Struct({ message: Schema.optional(Schema.String) });
 const decodeErrorBody = Schema.decodeUnknownOption(Schema.fromJsonString(ErrorBody));
 const decodeJson = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
 
+/**
+ * Azure's own errors start with a code such as `TF401027:` and say what to change; anything else
+ * may be a proxy's page, so it stays in the cause and the reader gets a fixed sentence. URLs keep
+ * only their origin and path, as a query can carry a signature.
+ */
 function boundedDetail(text: string | undefined): string | undefined {
   const line = text?.replace(/\s+/gu, " ").trim();
-  if (!line) return undefined;
-  return line.length > MAX_DETAIL ? `${line.slice(0, MAX_DETAIL)}…` : line;
+  if (!line || !/^(?:TF|VS)\d+:/u.test(line)) return undefined;
+  const safe = line.replace(/\bhttps?:\/\/[^\s"'<>]+/giu, (url) => {
+    const parsed = URL.parse(url);
+    return parsed === null ? "" : `${parsed.origin}${parsed.pathname}`;
+  });
+  return safe.length > MAX_DETAIL ? `${safe.slice(0, MAX_DETAIL)}…` : safe;
 }
 
 function statusFailure(
   status: number,
   text: string,
 ): { readonly reason: AzureDevOpsServerFailure; readonly detail: string } {
-  const message = boundedDetail(Option.getOrUndefined(decodeErrorBody(text))?.message);
+  const raw = Option.getOrUndefined(decodeErrorBody(text))?.message;
+  const message = boundedDetail(raw);
   if (status === 401) {
     return {
       reason: "unauthenticated",
@@ -185,14 +195,11 @@ function statusFailure(
   if (status === 429 || status === 503) {
     return { reason: "rate-limited", detail: message ?? "The server asked to slow down." };
   }
-  if (
-    status === 400 &&
-    message !== undefined &&
-    /\bout of range\b|\bnot supported\b/iu.test(message)
-  ) {
+  if (status === 400 && raw !== undefined && /\bout of range\b/iu.test(raw)) {
+    const latest = /supports is (\d+\.\d+)/iu.exec(raw)?.[1];
     return {
       reason: "unsupported-server",
-      detail: `${message} T3 Code needs Azure DevOps Server 2022 or newer.`,
+      detail: `T3 Code needs Azure DevOps Server 2022 or newer${latest === undefined ? "" : `; this server's REST API goes up to ${latest}`}.`,
     };
   }
   return { reason: "failed", detail: message ?? `The server answered HTTP ${status}.` };
