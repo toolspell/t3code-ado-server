@@ -233,6 +233,29 @@ export const HostCredentialSettings = Schema.Struct(hostCredentialSettingsFields
 export type HostCredentialSettings = typeof HostCredentialSettings.Type;
 
 /**
+ * Settings of a host the user adds servers of by URL, each with its own token, keyed by
+ * `normalizeSourceControlServerUrl`. The secret store keeps one entry per key, as for hostnames.
+ */
+export const serverCredentialSettingsFields = {
+  tokens: hostCredentialSettingsFields.tokens,
+};
+
+/**
+ * A self-hosted server's base URL as a settings key: lower case, without credentials, query,
+ * hash or trailing slash. Null when `value` is not an http or https URL.
+ */
+export function normalizeSourceControlServerUrl(value: string): string | null {
+  const url = URL.parse(value.trim());
+  if (url === null || (url.protocol !== "https:" && url.protocol !== "http:")) return null;
+  if (url.hostname === "") return null;
+  url.username = "";
+  url.password = "";
+  url.search = "";
+  url.hash = "";
+  return url.href.replace(/\/+$/u, "").toLowerCase();
+}
+
+/**
  * What the server and every client know about a forge. It is plain data and pure functions so
  * one copy serves both sides; a lint rule keeps UI runtimes out of `shared/`.
  */

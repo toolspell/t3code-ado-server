@@ -10,6 +10,14 @@
     "./server/driver": {
       "types": "./src/server/driver.ts",
       "import": "./src/server/driver.ts"
+    },
+    "./shared/serverDefinition": {
+      "types": "./src/shared/serverDefinition.ts",
+      "import": "./src/shared/serverDefinition.ts"
+    },
+    "./server/serverDriver": {
+      "types": "./src/server/onPrem/driver.ts",
+      "import": "./src/server/onPrem/driver.ts"
     }
   },
   "scripts": {
@@ -17,6 +25,7 @@
     "test": "vp test run --config ../../vite.config.ts --dir ."
   },
   "dependencies": {
+    "@effect/platform-node": "catalog:",
     "@t3tools/contracts": "workspace:*",
     "@t3tools/shared": "workspace:*",
     "@t3tools/source-control-core": "workspace:*",
@@ -24,7 +33,6 @@
     "effect": "catalog:"
   },
   "devDependencies": {
-    "@effect/platform-node": "catalog:",
     "@effect/vitest": "catalog:",
     "@t3tools/source-control-testing": "workspace:*",
     "@types/node": "catalog:",
