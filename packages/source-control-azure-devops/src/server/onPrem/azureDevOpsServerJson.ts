@@ -397,18 +397,62 @@ export function mentionedIdentityIds(threads: ServerThreads): ReadonlyArray<stri
   return mentionIdsIn(threads.comments.map((comment) => comment.body).join("\n"));
 }
 
+const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+
 /**
- * `@Display Name` back to `@<id>` for the identities a comment mentioned before its edit, longest
- * name first so one name inside another cannot take its place.
+ * `@Display Name` back to `@<id>` for the identities `original` mentioned, longest name first so a
+ * name inside another cannot take its place. Two people with one name are restored in the order
+ * they were mentioned; a further mention of an ambiguous name stays text.
  */
-export function restoreMentions(text: string, names: ReadonlyMap<string, string>): string {
-  let restored = text;
-  for (const [id, name] of [...names].toSorted(
-    ([, left], [, right]) => right.length - left.length,
+export function restoreMentions(
+  edited: string,
+  original: string,
+  names: ReadonlyMap<string, string>,
+): string {
+  const idsByName = new Map<string, string[]>();
+  for (const match of original.matchAll(MENTION)) {
+    const id = match[1]!.toLowerCase();
+    const name = names.get(id);
+    if (name === undefined) continue;
+    const ids = idsByName.get(name) ?? [];
+    ids.push(id);
+    idsByName.set(name, ids);
+  }
+  let restored = edited;
+  for (const [name, ids] of [...idsByName].toSorted(
+    ([left], [right]) => right.length - left.length,
   )) {
-    restored = restored.replaceAll(`@${name}`, `@<${id}>`);
+    const distinct = [...new Set(ids)];
+    let seen = 0;
+    restored = restored.replace(new RegExp(`@${escapeRegExp(name)}(?![\\w])`, "gu"), (written) => {
+      const id = distinct.length === 1 ? distinct[0] : ids[seen];
+      seen += 1;
+      return id === undefined ? written : `@<${id}>`;
+    });
   }
   return restored;
+}
+
+const RawChangeTracking = Schema.Struct({
+  changeEntries: Schema.Array(
+    Schema.Struct({
+      changeTrackingId: OptionalInt,
+      item: Schema.optional(Schema.NullOr(Schema.Struct({ path: OptionalString }))),
+    }),
+  ),
+});
+
+/** Each changed file's change tracking id in an iteration, keyed by its path without `/`. */
+export function decodeChangeTrackingIds(body: unknown): ReadonlyMap<string, number> {
+  const [decoded] = decodeEach(RawChangeTracking, [body]);
+  return new Map(
+    (decoded?.changeEntries ?? []).flatMap((entry) => {
+      const path = toRepositoryPath(entry.item?.path);
+      return path === null || entry.changeTrackingId == null
+        ? []
+        : [[path, entry.changeTrackingId] as const];
+    }),
+  );
 }
 
 const RawCommentContent = Schema.Struct({ content: OptionalString });

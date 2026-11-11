@@ -54,6 +54,7 @@ import {
   decodeAccountName,
   decodeChecks,
   decodeCommits,
+  decodeChangeTrackingIds,
   decodeCommentContent,
   decodeConnectionData,
   decodeIdentityIds,
@@ -763,6 +764,13 @@ export const make = Effect.gen(function* () {
     content: string,
     operation: string,
     threadContext?: ReturnType<typeof threadContextOf>,
+    pullRequestThreadContext?: {
+      readonly changeTrackingId: number;
+      readonly iterationContext: {
+        readonly firstComparingIteration: number;
+        readonly secondComparingIteration: number;
+      };
+    },
   ) =>
     api.request({
       server: target.server,
@@ -772,10 +780,30 @@ export const make = Effect.gen(function* () {
       body: {
         comments: [{ parentCommentId: 0, content, commentType: 1 }],
         status: "active",
-        // Azure fills in the iteration and change tracking itself from the file and lines.
         ...(threadContext === undefined ? {} : { threadContext }),
+        ...(pullRequestThreadContext === undefined ? {} : { pullRequestThreadContext }),
       },
     });
+
+  /**
+   * The latest iteration and each file's change tracking id in it, which a file comment names so
+   * it follows its lines across later pushes. Empty when the pull request has no iterations.
+   */
+  const reviewTracking = Effect.fn("AzureDevOpsServerPullRequestProvider.reviewTracking")(
+    function* (target: ServerRepositoryRef, number: number) {
+      const latest = (yield* listIterations(target, number, "submitReview")).at(-1);
+      if (latest === undefined) return null;
+      const tracking = decodeChangeTrackingIds(
+        yield* api.request({
+          server: target.server,
+          operation: "submitReview",
+          path: `${pullRequestPath(target, number)}/iterations/${latest.id}/changes`,
+          query: { $top: CHANGE_ENTRIES_PER_PAGE },
+        }),
+      );
+      return { iteration: latest.id, tracking };
+    },
+  );
 
   // Display names change rarely; a mention keeps its id either way.
   const identityNames = new Map<string, string>();
@@ -1322,7 +1350,7 @@ export const make = Effect.gen(function* () {
           operation: "updateComment",
           method: "PATCH",
           path,
-          body: { content: restoreMentions(input.body, names) },
+          body: { content: restoreMentions(input.body, original, names) },
         });
       },
       Effect.mapError(fail("updateComment")),
@@ -1331,13 +1359,25 @@ export const make = Effect.gen(function* () {
     submitReview: Effect.fn("AzureDevOpsServerPullRequestProvider.submitReview")(
       function* (input) {
         const target = yield* locate(input);
+        const tracking =
+          input.comments.length === 0 ? null : yield* reviewTracking(target, input.number);
         for (const draft of input.comments) {
+          const changeTrackingId = tracking?.tracking.get(draft.path.replace(/^\/+/u, ""));
           yield* postThread(
             target,
             input.number,
             draft.body,
             "submitReview",
             threadContextOf(draft),
+            tracking === null || changeTrackingId === undefined
+              ? undefined
+              : {
+                  changeTrackingId,
+                  iterationContext: {
+                    firstComparingIteration: 1,
+                    secondComparingIteration: tracking.iteration,
+                  },
+                },
           );
         }
         if (input.body.trim() !== "") {

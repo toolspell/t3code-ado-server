@@ -428,7 +428,13 @@ describe("threadContextOf", () => {
 });
 
 it.effect("posts a review's comments, then votes for the viewer", () => {
-  const { layer, calls } = makeLayer({ pullRequests: [] });
+  const { layer, calls } = makeLayer({
+    pullRequests: [],
+    answer: (input) =>
+      input.path === `${BASE}/pullRequests/26/iterations/1/changes`
+        ? { changeEntries: [{ changeTrackingId: 2, item: { path: "/src/store.js" } }] }
+        : undefined,
+  });
   return Effect.gen(function* () {
     const provider = yield* AzureDevOpsServerPullRequestProvider.make;
     yield* provider.submitReview({
@@ -453,6 +459,15 @@ it.effect("posts a review's comments, then votes for the viewer", () => {
         ["PUT", `${BASE}/pullRequests/26/reviewers/viewer-id`, -5],
         ["PUT", `${BASE}/pullRequests/26/reviewers/viewer-id`, 10],
       ],
+    );
+    // A file comment names its change in the latest iteration, so it follows later pushes.
+    assert.deepStrictEqual(
+      (writes(calls)[0]?.body as { pullRequestThreadContext?: unknown } | undefined)
+        ?.pullRequestThreadContext,
+      {
+        changeTrackingId: 2,
+        iterationContext: { firstComparingIteration: 1, secondComparingIteration: 1 },
+      },
     );
   }).pipe(Effect.provide(layer));
 });

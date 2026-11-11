@@ -342,13 +342,24 @@ describe("mentions, edit rights and replies", () => {
   });
 
   // The editor gets names, so saving an edit must not turn a mention into plain text.
-  it("restores the mentions a comment had before its edit, longest name first", () => {
+  it("restores the mentions a comment had before its edit, by name and in order", () => {
+    const id = (n: number) => `0000000${n}-0000-4000-8000-000000000000`;
     const names = new Map([
-      ["max-id", "Max"],
-      ["maxb-id", "Max Beckenbach"],
+      [id(1), "Max"],
+      [id(2), "Max Beckenbach"],
+      // Two people with one name.
+      [id(3), "Alex Smith"],
+      [id(4), "Alex Smith"],
     ]);
-    expect(restoreMentions("Ping @Max Beckenbach and @Max, cc @Someone.", names)).toBe(
-      "Ping @<maxb-id> and @<max-id>, cc @Someone.",
+    const original = `Ping @<${id(2)}> and @<${id(1)}>, also @<${id(3)}> and @<${id(4)}>.`;
+    expect(
+      restoreMentions(
+        "Ping @Max Beckenbach and @Max, also @Alex Smith and @Alex Smith, cc @Maxwell. Later @Alex Smith.",
+        original,
+        names,
+      ),
+    ).toBe(
+      `Ping @<${id(2)}> and @<${id(1)}>, also @<${id(3)}> and @<${id(4)}>, cc @Maxwell. Later @Alex Smith.`,
     );
   });
 
