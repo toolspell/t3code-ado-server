@@ -99,6 +99,7 @@ it.effect("offers the parent URL when a project page answers instead of a collec
     if (result._tag !== "Failure") return;
     assert.strictEqual(result.failure.reason, "wrong-server");
     assert.deepStrictEqual(result.failure.suggestions, ["https://tfs.corp/defaultcollection"]);
+    assert.strictEqual(result.failure.cause, notJson);
   }).pipe(Effect.provide(layer));
 });
 

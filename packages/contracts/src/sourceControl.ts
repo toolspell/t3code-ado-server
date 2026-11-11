@@ -288,6 +288,7 @@ export class SourceControlCheckServerError extends Schema.TaggedError<SourceCont
     detail: Schema.String,
     /** URLs to offer instead, such as a server's collections when the URL named none. */
     suggestions: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
+    cause: Schema.optional(Schema.Defect()),
   },
 ) {
   override get message(): string {

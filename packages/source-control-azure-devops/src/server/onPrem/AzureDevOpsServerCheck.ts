@@ -56,14 +56,17 @@ export const make = Effect.gen(function* () {
     const fail = (
       reason: SourceControlCheckServerFailure,
       detail: string,
-      suggestions?: ReadonlyArray<string>,
+      options: { readonly suggestions?: ReadonlyArray<string>; readonly cause?: unknown } = {},
     ) =>
       new SourceControlCheckServerError({
         provider: KIND,
         url: input.url,
         reason,
         detail,
-        ...(suggestions === undefined || suggestions.length === 0 ? {} : { suggestions }),
+        ...(options.suggestions === undefined || options.suggestions.length === 0
+          ? {}
+          : { suggestions: options.suggestions }),
+        ...(options.cause === undefined ? {} : { cause: options.cause }),
       });
     const server = normalizeSourceControlServerUrl(input.url);
     if (server === null) {
@@ -84,6 +87,7 @@ export const make = Effect.gen(function* () {
         error.reason === "not-found"
           ? `Nothing at this URL answers like Azure DevOps Server. ${COLLECTION_HINT}`
           : error.detail,
+        { cause: error },
       );
     const request = (path: string, preview?: boolean) =>
       api.request({
@@ -103,7 +107,7 @@ export const make = Effect.gen(function* () {
           return fail(
             "wrong-server",
             `This URL does not answer like an Azure DevOps Server collection. ${COLLECTION_HINT}`,
-            parent === null ? [] : [parent],
+            { suggestions: parent === null ? [] : [parent], cause: error },
           );
         }),
       ),
@@ -136,9 +140,12 @@ export const make = Effect.gen(function* () {
       return yield* fail(
         "wrong-server",
         `This is the server, not a collection. ${COLLECTION_HINT}`,
-        collections.flatMap(
-          (name) => normalizeSourceControlServerUrl(`${server}/${encodeURIComponent(name)}`) ?? [],
-        ),
+        {
+          suggestions: collections.flatMap(
+            (name) =>
+              normalizeSourceControlServerUrl(`${server}/${encodeURIComponent(name)}`) ?? [],
+          ),
+        },
       );
     }
     yield* request("_apis/projects").pipe(Effect.mapError(fromApi));

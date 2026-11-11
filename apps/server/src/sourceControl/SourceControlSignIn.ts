@@ -110,7 +110,8 @@ const make = Effect.gen(function* () {
                     provider: input.provider,
                     url: input.url,
                     reason: "unauthenticated",
-                    detail: cause.message,
+                    detail: `Could not read the token from the secret provider "${cause.provider}". Unlock or fix it in Settings, then try again.`,
+                    cause,
                   }),
               ),
             );

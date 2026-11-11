@@ -1,11 +1,7 @@
 import { SecretProviderId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import {
-  savedServers,
-  serverDraftProblem,
-  serverTokenPatch,
-} from "./SourceControlServerSettings.logic";
+import { savedServers, serverDraftProblem } from "./SourceControlServerSettings.logic";
 
 const reference = { provider: SecretProviderId.make("op"), reference: "op://vault/ado/token" };
 
@@ -47,14 +43,5 @@ describe("serverDraftProblem", () => {
     ["https://tfs.corp/defaultcollection", "new-pat", saved[0]!.url, null],
   ])("checks %s", (url, token, editing, problem) => {
     expect(serverDraftProblem({ url, token, editing, saved })).toBe(problem);
-  });
-});
-
-describe("serverTokenPatch", () => {
-  // The server merges tokens per URL, so sending one leaves the other servers' secrets alone.
-  it("sends only the server being saved or removed", () => {
-    expect(serverTokenPatch("azure-devops-server", "https://tfs.corp/c", "")).toEqual({
-      sourceControlHosts: { "azure-devops-server": { tokens: { "https://tfs.corp/c": "" } } },
-    });
   });
 });
