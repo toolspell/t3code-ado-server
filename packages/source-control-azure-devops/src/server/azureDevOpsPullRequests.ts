@@ -175,6 +175,7 @@ function normalizeAzureDevOpsPullRequestRecord(
     isCrossRepository: raw.forkSource != null,
     closedAt: state === "closed" ? terminalAt : null,
     mergedAt: state === "merged" ? terminalAt : null,
+    // This only ranks a branch's pull requests; threads per row would cost a Python start each.
     updatedAt: (raw.closedDate ?? Option.none()).pipe(
       Option.orElse(() => raw.creationDate ?? Option.none()),
     ),

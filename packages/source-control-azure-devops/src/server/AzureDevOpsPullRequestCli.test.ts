@@ -114,29 +114,36 @@ layer("AzureDevOpsPullRequestCli.layer", (it) => {
     Effect.gen(function* () {
       const previousHead = "a".repeat(40);
       const latestHead = "c".repeat(40);
-      mockedExecute
-        .mockReturnValueOnce(
-          Effect.succeed(
-            output(json({ ...pullRequestRow, lastMergeSourceCommit: { commitId: previousHead } })),
-          ),
-        )
-        .mockReturnValueOnce(
-          Effect.succeed(
-            output(
-              json({
-                value: [
-                  {
-                    id: 2,
-                    sourceRefCommit: { commitId: latestHead },
-                    commonRefCommit: { commitId: "b".repeat(40) },
-                  },
-                  ...oneIteration.value,
-                ],
-              }),
-            ),
-          ),
-        )
-        .mockReturnValueOnce(Effect.succeed(output(json({ changeEntries: [] }))));
+      // Threads and iterations are read side by side, so answer by resource, not by turn.
+      mockedExecute.mockImplementation(({ args }) => {
+        switch (args[args.indexOf("--resource") + 1]) {
+          case "pullRequestThreads":
+            return Effect.succeed(output(json({ value: [] })));
+          case "pullRequestIterations":
+            return Effect.succeed(
+              output(
+                json({
+                  value: [
+                    {
+                      id: 2,
+                      sourceRefCommit: { commitId: latestHead },
+                      commonRefCommit: { commitId: "b".repeat(40) },
+                    },
+                    ...oneIteration.value,
+                  ],
+                }),
+              ),
+            );
+          case "pullRequestIterationChanges":
+            return Effect.succeed(output(json({ changeEntries: [] })));
+          default:
+            return Effect.succeed(
+              output(
+                json({ ...pullRequestRow, lastMergeSourceCommit: { commitId: previousHead } }),
+              ),
+            );
+        }
+      });
       const provider = yield* AzureDevOpsPullRequestProvider.make;
       const detail = yield* provider.getChangeRequest({
         cwd: "/w",
@@ -146,8 +153,12 @@ layer("AzureDevOpsPullRequestCli.layer", (it) => {
       });
 
       expect(detail.headSha).toBe(latestHead);
-      expect(argsOfCall(2)).toContain("iterationId=2");
-      expect(mockedExecute).toHaveBeenCalledTimes(3);
+      expect(
+        mockedExecute.mock.calls.find(([call]) =>
+          call.args.includes("pullRequestIterationChanges"),
+        )?.[0].args,
+      ).toContain("iterationId=2");
+      expect(mockedExecute).toHaveBeenCalledTimes(4);
     }),
   );
 

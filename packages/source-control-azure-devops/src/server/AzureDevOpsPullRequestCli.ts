@@ -5,7 +5,6 @@ import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import type {
   PullRequestAction,
-  PullRequestComment,
   PullRequestInvolvement,
   PullRequestListState,
   PullRequestMergeMethod,
@@ -25,6 +24,7 @@ import {
   type AzureDevOpsIteration,
   type AzureDevOpsPullRequest,
   type AzureDevOpsRepositoryLocation,
+  type AzureDevOpsThreads,
 } from "./azureDevOpsPullRequestJson.ts";
 import type { ProviderListCursor } from "@t3tools/source-control-core/server/PullRequestProvider";
 
@@ -161,7 +161,7 @@ export class AzureDevOpsPullRequestCli extends Context.Service<
       readonly cwd: string;
       readonly location: AzureDevOpsRepositoryLocation;
       readonly number: number;
-    }) => Effect.Effect<ReadonlyArray<PullRequestComment>, AzureDevOpsPullRequestCliError>;
+    }) => Effect.Effect<AzureDevOpsThreads, AzureDevOpsPullRequestCliError>;
 
     readonly listIterations: (input: {
       readonly cwd: string;

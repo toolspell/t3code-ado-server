@@ -129,6 +129,7 @@ describe("getChangeRequest", () => {
         Effect.provide(
           Layer.mock(AzureDevOpsPullRequestCli.AzureDevOpsPullRequestCli)({
             getPullRequest: () => Effect.succeed(PULL_REQUEST),
+            listThreads: () => Effect.succeed({ comments: [], lastUpdatedAt: null }),
             listIterations: () =>
               Effect.succeed([ITERATION, { ...ITERATION, id: 4, headCommit: "new-head" }]),
             listIterationChanges: () =>
@@ -163,6 +164,7 @@ describe("getChangeRequest", () => {
           Effect.provide(
             Layer.mock(AzureDevOpsPullRequestCli.AzureDevOpsPullRequestCli)({
               getPullRequest: () => Effect.succeed(PULL_REQUEST),
+              listThreads: () => Effect.succeed({ comments: [], lastUpdatedAt: null }),
               listIterations: () =>
                 state === "missing"
                   ? Effect.succeed([])
@@ -186,6 +188,61 @@ describe("getChangeRequest", () => {
         expect(detail.headSha).toBeUndefined();
         expect(detail.changedFiles).toBe(0);
       }),
+  );
+});
+
+describe("when a pull request last changed", () => {
+  const ref = { cwd: "/w", repository: "acme/web", host: "dev.azure.com", number: 7 };
+  const providerWith = (
+    listThreads: AzureDevOpsPullRequestCli.AzureDevOpsPullRequestCli["Service"]["listThreads"],
+  ) =>
+    make.pipe(
+      Effect.provide(
+        Layer.mock(AzureDevOpsPullRequestCli.AzureDevOpsPullRequestCli)({
+          getPullRequest: () => Effect.succeed(PULL_REQUEST),
+          runPullRequestAction: () => Effect.succeed(PULL_REQUEST),
+          listIterations: () => Effect.succeed([ITERATION]),
+          listIterationChanges: () => Effect.succeed({ changes: [], truncated: false }),
+          listThreads,
+        }),
+      ),
+    );
+
+  it.effect("dates every read of a pull request alike, by its newest thread", () =>
+    Effect.gen(function* () {
+      const provider = yield* providerWith(() =>
+        Effect.succeed({ comments: [], lastUpdatedAt: "2026-07-04T09:14:13Z" }),
+      );
+
+      const reads = [
+        (yield* provider.getChangeRequest(ref)).updatedAt,
+        (yield* provider.getChangeRequestSummary?.(ref) ?? Effect.die("no summary read")).updatedAt,
+        (yield* provider.runAction({ ...ref, action: "ready" }))?.updatedAt,
+      ];
+      // The server orders these as text, so a whole second keeps its fraction digits.
+      expect(reads).toEqual(Array.from({ length: 3 }, () => "2026-07-04T09:14:13.000Z"));
+    }),
+  );
+
+  it.effect("keeps a read without threads on its own dates, but withholds an action reply", () =>
+    Effect.gen(function* () {
+      const provider = yield* providerWith(() =>
+        Effect.fail(
+          new AzureDevOpsPullRequestCli.AzureDevOpsPullRequestReadError({
+            command: "az",
+            cwd: "/w",
+            operation: "listThreads",
+            cause: "unavailable",
+          }),
+        ),
+      );
+
+      expect((yield* provider.getChangeRequest(ref)).updatedAt).toBe("2026-07-02T00:00:00.000Z");
+      expect(
+        (yield* provider.getChangeRequestSummary?.(ref) ?? Effect.die("no summary read")).updatedAt,
+      ).toBe("2026-07-02T00:00:00.000Z");
+      expect(yield* provider.runAction({ ...ref, action: "ready" })).toBeUndefined();
+    }),
   );
 });
 

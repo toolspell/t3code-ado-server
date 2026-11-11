@@ -3,7 +3,9 @@ import {
   normalizeRefName,
 } from "@t3tools/source-control-core/server/pullRequestUtils";
 import * as Cause from "effect/Cause";
+import * as DateTime from "effect/DateTime";
 import * as Exit from "effect/Exit";
+import * as Option from "effect/Option";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import type {
@@ -74,6 +76,7 @@ const RawPullRequestSchema = Schema.Struct({
 const RawThreadSchema = Schema.Struct({
   id: Schema.Int,
   isDeleted: Schema.optional(Schema.NullOr(Schema.Boolean)),
+  lastUpdatedDate: Schema.optional(Schema.NullOr(Schema.String)),
   threadContext: Schema.optional(
     Schema.NullOr(Schema.Struct({ filePath: Schema.optional(Schema.NullOr(Schema.String)) })),
   ),
@@ -106,6 +109,16 @@ const RawViewerSchema = Schema.Struct({
 export interface AzureDevOpsRepositoryLocation {
   readonly project: string;
   readonly repository: string;
+}
+
+export interface AzureDevOpsThreads {
+  readonly comments: ReadonlyArray<PullRequestComment>;
+  /**
+   * Azure keeps no update time on a pull request. Its threads, system ones included, date every
+   * push, comment, vote and status change. Title or description edits and work item links leave
+   * no date at all.
+   */
+  readonly lastUpdatedAt: string | null;
 }
 
 export interface AzureDevOpsPullRequest {
@@ -285,18 +298,19 @@ export function decodeViewerJson(raw: string): Result.Result<string | null, Deco
     : Result.fail(decoded.failure);
 }
 
-export function decodeThreadsJson(
-  raw: string,
-): Result.Result<ReadonlyArray<PullRequestComment>, DecodeFailure> {
+export function decodeThreadsJson(raw: string): Result.Result<AzureDevOpsThreads, DecodeFailure> {
   const decoded = decodeThreadPage(raw);
   if (!Result.isSuccess(decoded)) {
     return Result.fail(decoded.failure);
   }
   const comments: PullRequestComment[] = [];
+  let lastUpdatedAt: string | null = null;
   for (const entry of decoded.success.value) {
     const decodedThread = decodeThreadEntry(entry);
     if (Exit.isFailure(decodedThread)) continue;
     const thread = decodedThread.value;
+    // A deleted comment moves its thread's date too, and drops out of the conversation.
+    lastUpdatedAt = latestTime(lastUpdatedAt, trimmed(thread.lastUpdatedDate));
     if (thread.isDeleted === true) continue;
     const path = toRepositoryPath(thread.threadContext?.filePath);
     for (const comment of thread.comments ?? []) {
@@ -321,9 +335,20 @@ export function decodeThreadsJson(
       });
     }
   }
-  return Result.succeed(
-    comments.toSorted((left, right) => left.createdAt.localeCompare(right.createdAt)),
+  return Result.succeed({
+    comments: comments.toSorted((left, right) => left.createdAt.localeCompare(right.createdAt)),
+    lastUpdatedAt,
+  });
+}
+
+/** Azure varies the digits it prints, and the server orders these times as text: emit one form. */
+export function latestTime(...times: ReadonlyArray<string | null>): string | null {
+  const [first, ...rest] = times.flatMap((time) =>
+    time === null ? [] : Option.toArray(DateTime.make(time)),
   );
+  return first === undefined
+    ? null
+    : DateTime.formatIso(rest.reduce((latest, next) => DateTime.max(latest, next), first));
 }
 
 const RawIterationSchema = Schema.Struct({

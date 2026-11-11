@@ -169,7 +169,7 @@ describe("decodePullRequestJson", () => {
 
 describe("decodeThreadsJson", () => {
   it("takes every real comment of every thread, oldest first", () => {
-    const comments = expectSuccess(
+    const { comments } = expectSuccess(
       decodeThreadsJson(
         asJson({
           value: [
@@ -209,7 +209,7 @@ describe("decodeThreadsJson", () => {
   });
 
   it("reads a thread pinned to a file as a review comment on the path its diff uses", () => {
-    const comments = expectSuccess(
+    const { comments } = expectSuccess(
       decodeThreadsJson(
         asJson({
           value: [
@@ -227,7 +227,7 @@ describe("decodeThreadsJson", () => {
   });
 
   it("keeps the replies under a thread, which are as much of the conversation", () => {
-    const comments = expectSuccess(
+    const { comments } = expectSuccess(
       decodeThreadsJson(
         asJson({
           value: [
@@ -249,7 +249,7 @@ describe("decodeThreadsJson", () => {
   });
 
   it("drops deleted threads and threads with nothing to show", () => {
-    const comments = expectSuccess(
+    const { comments } = expectSuccess(
       decodeThreadsJson(
         asJson({
           value: [
@@ -269,6 +269,38 @@ describe("decodeThreadsJson", () => {
     );
 
     expect(comments).toEqual([]);
+  });
+
+  it("dates the last change by its newest thread, deleted and system ones included", () => {
+    const { lastUpdatedAt } = expectSuccess(
+      decodeThreadsJson(
+        asJson({
+          value: [
+            {
+              id: 1,
+              lastUpdatedDate: "2026-07-03T09:12:40.943Z",
+              comments: [{ id: 1, content: "Rename this.", publishedDate: "2026-07-03T09:08:55Z" }],
+            },
+            {
+              id: 2,
+              lastUpdatedDate: "2026-07-03T09:14:13Z",
+              comments: [
+                {
+                  id: 1,
+                  content: "Bilal voted 10",
+                  commentType: "system",
+                  publishedDate: "2026-07-03T09:14:13Z",
+                },
+              ],
+            },
+            { id: 3, isDeleted: true, lastUpdatedDate: "2026-07-03T09:14:13.947Z", comments: [] },
+          ],
+        }),
+      ),
+    );
+
+    // As text, "13Z" sorts after "13.947Z".
+    expect(lastUpdatedAt).toBe("2026-07-03T09:14:13.947Z");
   });
 });
 
@@ -435,7 +467,7 @@ describe("what az devops invoke answers with", () => {
   it("reads the envelope the extension adds its own continuation token to", () => {
     expect(
       expectSuccess(decodeThreadsJson(asJson({ value: [], count: 0, continuation_token: null }))),
-    ).toEqual([]);
+    ).toEqual({ comments: [], lastUpdatedAt: null });
 
     expect(
       expectSuccess(

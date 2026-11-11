@@ -26,12 +26,13 @@ import {
   type ProviderDiffSlice,
   type PullRequestProviderApi,
 } from "@t3tools/source-control-core/server/PullRequestProvider";
-import type {
-  AzureDevOpsChangeEntry,
-  AzureDevOpsItemContent,
-  AzureDevOpsIteration,
-  AzureDevOpsPullRequest,
-  AzureDevOpsRepositoryLocation,
+import {
+  latestTime,
+  type AzureDevOpsChangeEntry,
+  type AzureDevOpsItemContent,
+  type AzureDevOpsIteration,
+  type AzureDevOpsPullRequest,
+  type AzureDevOpsRepositoryLocation,
 } from "./azureDevOpsPullRequestJson.ts";
 import { definition } from "../shared/definition.ts";
 
@@ -115,6 +116,13 @@ function toChangeRequest(pullRequest: AzureDevOpsPullRequest): ProviderChangeReq
   };
 }
 
+function datedBy(pullRequest: AzureDevOpsPullRequest, lastUpdatedAt: string | null) {
+  return {
+    ...pullRequest,
+    updatedAt: latestTime(pullRequest.updatedAt, lastUpdatedAt) ?? pullRequest.updatedAt,
+  };
+}
+
 function toSummary(pullRequest: AzureDevOpsPullRequest): ProviderChangeRequestSummary {
   return {
     number: pullRequest.number,
@@ -184,6 +192,18 @@ export const make = Effect.gen(function* () {
       }),
     );
   };
+
+  // Every read of one pull request must agree on when it last changed: the server and clients
+  // drop a reading older than the one they hold.
+  const datedByThreads = (cwd: string, pullRequest: AzureDevOpsPullRequest) =>
+    pullRequest.location === null
+      ? Effect.succeed(datedBy(pullRequest, null))
+      : cli
+          .listThreads({ cwd, location: pullRequest.location, number: pullRequest.number })
+          .pipe(Effect.map((threads) => datedBy(pullRequest, threads.lastUpdatedAt)));
+
+  const withLastActivity = (cwd: string, pullRequest: AzureDevOpsPullRequest) =>
+    datedByThreads(cwd, pullRequest).pipe(Effect.orElseSucceed(() => datedBy(pullRequest, null)));
 
   const diffScope = Effect.fn("AzureDevOpsPullRequestProvider.diffScope")(function* (input: {
     readonly cwd: string;
@@ -285,6 +305,7 @@ export const make = Effect.gen(function* () {
         .pipe(
           Effect.mapError(fail("listChangeRequests")),
           Effect.map((batch) => ({
+            // Rows keep their creation or closing time: threads per row cost a Python start each.
             items: batch.items.map(toChangeRequest),
             truncated: batch.truncated,
             cursorAdvance: batch.cursorAdvance,
@@ -308,34 +329,38 @@ export const make = Effect.gen(function* () {
       ),
 
     getChangeRequestSummary: (input) =>
-      cli
-        .getPullRequest({ cwd: input.cwd, number: input.number })
-        .pipe(Effect.mapError(fail("getChangeRequestSummary")), Effect.map(toSummary)),
+      cli.getPullRequest({ cwd: input.cwd, number: input.number }).pipe(
+        Effect.flatMap((pullRequest) => withLastActivity(input.cwd, pullRequest)),
+        Effect.mapError(fail("getChangeRequestSummary")),
+        Effect.map(toSummary),
+      ),
 
     getChangeRequest: Effect.fn("AzureDevOpsPullRequestProvider.getChangeRequest")(
       function* (input) {
-        const pullRequest = yield* cli.getPullRequest({ cwd: input.cwd, number: input.number });
-        const location = pullRequest.location;
-        const iterations =
-          location === null
-            ? []
-            : yield* cli
-                .listIterations({ cwd: input.cwd, location, number: input.number })
-                .pipe(Effect.orElseSucceed(() => []));
+        const read = yield* cli.getPullRequest({ cwd: input.cwd, number: input.number });
+        const location = read.location;
+        const changes = Effect.gen(function* () {
+          if (location === null) return { iterations: [], changedFiles: 0 };
+          const iterations = yield* cli
+            .listIterations({ cwd: input.cwd, location, number: input.number })
+            .pipe(Effect.orElseSucceed(() => []));
+          const changedFiles = yield* listLatestChanges({
+            cwd: input.cwd,
+            location,
+            number: input.number,
+            iterations,
+          }).pipe(
+            Effect.map((listed) => listed.changes.length),
+            Effect.orElseSucceed(() => 0),
+          );
+          return { iterations, changedFiles };
+        });
+        const [pullRequest, { iterations, changedFiles }] = yield* Effect.all(
+          [withLastActivity(input.cwd, read), changes],
+          { concurrency: 2 },
+        );
         // The trial merge's lastMergeSourceCommit can lag behind a new source push.
         const headSha = iterations.at(-1)?.headCommit;
-        const changedFiles =
-          location === null
-            ? 0
-            : yield* listLatestChanges({
-                cwd: input.cwd,
-                location,
-                number: input.number,
-                iterations,
-              }).pipe(
-                Effect.map((listed) => listed.changes.length),
-                Effect.orElseSucceed(() => 0),
-              );
         const detail: ProviderChangeRequestDetail = {
           ...toChangeRequest(pullRequest),
           body: pullRequest.body,
@@ -370,7 +395,7 @@ export const make = Effect.gen(function* () {
                   number: input.number,
                 })
                 .pipe(
-                  Effect.map((comments) => ({ comments, truncated: false })),
+                  Effect.map(({ comments }) => ({ comments, truncated: false })),
                   Effect.orElseSucceed(() => ({ comments: [], truncated: true })),
                 )
           ).pipe(
@@ -541,6 +566,12 @@ export const make = Effect.gen(function* () {
           ...(input.mergeMethod === undefined ? {} : { mergeMethod: input.mergeMethod }),
         })
         .pipe(
+          // A reply dated too early reads as older than what clients show; without one they reread.
+          Effect.flatMap((pullRequest) =>
+            pullRequest
+              ? datedByThreads(input.cwd, pullRequest).pipe(Effect.orElseSucceed(() => undefined))
+              : Effect.undefined,
+          ),
           Effect.mapError(fail("runAction")),
           Effect.map(
             (pullRequest) =>
