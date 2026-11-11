@@ -18,6 +18,12 @@ export function savedServers(
     .toSorted((left, right) => left.url.localeCompare(right.url));
 }
 
+function sameCollection(left: string, right: string): boolean {
+  const a = URL.parse(left);
+  const b = URL.parse(right);
+  return a !== null && b !== null && a.hostname === b.hostname && a.pathname === b.pathname;
+}
+
 /** Why a server cannot be saved as entered, or null. */
 export function serverDraftProblem(input: {
   readonly url: string;
@@ -29,6 +35,10 @@ export function serverDraftProblem(input: {
   if (url === null) return "Enter an http or https URL.";
   if (input.editing === null && input.saved.some((server) => server.url === url)) {
     return "This server is already added. Edit it to replace its token.";
+  }
+  // Remotes name no web port over SSH, so one collection must not be added twice.
+  if (input.editing === null && input.saved.some((server) => sameCollection(server.url, url))) {
+    return "This collection is already added under another port or scheme.";
   }
   if (typeof input.token === "string" && input.token.trim() === "") {
     return input.editing === null ? "Enter a personal access token." : "Enter a new token to save.";

@@ -35,6 +35,12 @@ describe("serverDraftProblem", () => {
       null,
       "This server is already added. Edit it to replace its token.",
     ],
+    [
+      "http://tfs.corp:8080/defaultcollection",
+      "pat",
+      null,
+      "This collection is already added under another port or scheme.",
+    ],
     ["https://other/c", " ", null, "Enter a personal access token."],
     ["https://tfs.corp/defaultcollection", "", saved[0]!.url, "Enter a new token to save."],
     ["https://other/c", "pat", null, null],

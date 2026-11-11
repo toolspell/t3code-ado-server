@@ -26,6 +26,7 @@ function makeLayer(
   const api = AzureDevOpsServerApi.AzureDevOpsServerApi.of({
     servers: Effect.succeed([]),
     resolveRepository: () => Effect.die("unused"),
+    resolveCheckout: () => Effect.die("unused"),
     requestText: (input) => request(input).pipe(Effect.map((body) => JSON.stringify(body))),
     request,
     requestList: (input) =>
